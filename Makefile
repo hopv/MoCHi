@@ -62,7 +62,7 @@ csisat:
 	cd csisat && make lib
 
 fpat: csisat
-	cd fpat && ./configure && make install-lib all install
+	cd fpat && autoconf && ./configure && make install-lib all install
 
 ################################################################################
 # bytecode and native-code compilation
