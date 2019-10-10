@@ -1,0 +1,24 @@
+Requirements:
+  - OCaml with the C headers installed
+  - GLPK
+
+Build:
+make
+
+Configuration:
+The Makefile assumes the following:
+  - The OCaml headers and GLPK headers are in the default include path.
+    If this is not the case, please modify the Makefile for OCaml,
+    or glpk_ml_wrapper/Makefile for GLPK.
+  - For static linking, the files 'libglpk.a', 'libz.a', 'libltdl.a', and
+    'libdl.a' are located in '/usr/lib/'.
+    If this is not the case, please modify variable GLPK in the Makefile.
+    This variable, and LIBS, are adapted for GLPK 4.28.
+    In the case of dynamic linking, the Makefile does not depend on the
+    version of GLPK.
+To compile a statically linked version, run 'make STATIC=1'.
+
+Code documentation:
+make doc
+
+This commands uses ocamldoc to generate an html documentation of the code.

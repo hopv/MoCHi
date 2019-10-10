@@ -1,0 +1,4 @@
+name="atp"
+description="Automated theorem proving library"
+archive(byte)="atp_batch.cma"
+archive(native)="atp_batch.cmxa"

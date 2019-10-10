@@ -1,0 +1,385 @@
+include Makefile.config
+
+# OCaml tools
+OCAMLFIND = ocamlfind
+OCAMLLEX  = ocamllex.opt
+OCAMLYACC = ocamlyacc
+
+# C compilers
+CLANG = @CLANG@
+CC = gcc
+CXX = g++
+
+# Git
+GIT = git
+
+# Libraries
+ENABLE_COMPLIBS = 1
+ENABLE_CVC3 = 1
+ENABLE_Z3 = 1
+ENABLE_CSISAT = 1
+ENABLE_ATP = 1
+ENABLE_APRON = 1
+
+# Normal compilation options
+BFLAGS = -g -w -8 -bin-annot -annot #-noassert #-thread
+OFLAGS = -w -8 -bin-annot -annot #-noassert #-thread
+
+# Archiving options
+CCOPT =
+
+# Source files
+SRC = global combinator printer timer logger dummy \
+
+# Basic data structures
+SRC := $(SRC) \
+       util zipper \
+       sexp \
+       bool integer float ordinal \
+       option pair triple quadruple set_ bag map_ \
+       vector matrix bitVector graph_ combination
+
+# Identifiers
+SRC := $(SRC) \
+       idnt
+
+# Mathematical expressions
+SRC := $(SRC) \
+       coeff linExp monoExp polyExp \
+       linIntExp linRealExp \
+       monoIntExp monoRealExp \
+       polyIntExp polyRealExp \
+       linPolyIntExp
+
+# Abstract syntax trees
+SRC := $(SRC) \
+       pattern absTerm \
+       typConst typBinder type typEnv \
+       const binder term typTerm \
+       termSubst envFun \
+       unitTerm boolTerm numTerm intTerm realTerm stringTerm \
+       typTermSubst \
+       simTypJudge
+
+# Formulas
+SRC := $(SRC) \
+       atom formula \
+       literal conjunction disjunction NNF cube clause DNF CNF
+
+# Abstract syntax trees
+SRC := $(SRC) \
+       cunTerm \
+       linTermIntExp \
+
+# Constraints
+SRC := $(SRC) \
+       linRel \
+       linIntRel linTermIntRel linRationalRel linRealRel \
+       polyIntRel polyRealRel \
+       linPolyIntRel
+
+# Predicates
+SRC := $(SRC) \
+       pred predVar pva \
+
+# SMT Solvers
+SRC := $(SRC) \
+       SMTProver
+
+# Atomic formulas
+SRC := $(SRC) \
+       unitAtom \
+       boolAtom boolFormula boolCube boolClause \
+       numAtom numLiteral numFormula \
+       unifier \
+       intAtom intLiteral intFormula intCube intClause \
+       realAtom realFormula \
+       pvaAtom pvaFormula \
+       pvaCube \
+       extConjunction extDisjunction \
+       cunAtom cunLiteral cunFormula
+
+# Functions for manipulating formulas
+SRC := $(SRC) \
+       formulaSimplifier \
+       predSubst \
+       polyhedron \
+       predAbst qelim qelimBody
+
+# Mathematical optimization
+SRC := $(SRC) \
+       farkas \
+       polyConstrSolver
+
+# Horn clauses
+SRC := $(SRC) \
+       hornClause HCCS
+
+# Simple type inference
+SRC := $(SRC) \
+       simTypInfer
+
+# Template expressions and size functions
+SRC := $(SRC) \
+       template rankFun
+
+# Interpolating theorem provers
+SRC := $(SRC) \
+       interpProver \
+       checkInterpProver unitBoolInterpProver generalizingInterpProver \
+       \
+       genInterpProver \
+       CHGenInterpProver
+
+# Horn constraint solvers
+SRC := $(SRC) \
+       undefHCCSSolver unusedHCCSSolver complementHCCSSolver \
+       fwHCCSSolver checkHCCSSolver \
+       inlineHCCSSolver reduceHCCSSolver \
+       HCCSSolver \
+       unitHCCSSolver boolHCCSSolver encBoolHCCSSolver \
+       \
+       bwIPHCCSSolver \
+       genHCCSSolver
+
+
+# Exists-forall and Forall-exists Horn constraint solvers
+SRC := $(SRC) \
+       EAHCCSSolver AEHCCSSolver
+
+# ML AST
+SRC := $(SRC) \
+       fdef prog \
+       traceSemantics \
+       callId callTree trace traceExp \
+       compTree compTreeExpander
+
+# Refinement types and abstraction types
+SRC := $(SRC) \
+       refType refTypJudge refTypInfer \
+       absType absTypInfer \
+       refTyp refTypEnv
+
+# Ranking function synthesizers
+SRC := $(SRC) \
+       rankFunInfer
+
+C_SRC = dummy
+C_INCLUDES =
+C_OPT = -fPIC
+REQUIRES = str unix bigarray num batteries zarith
+
+ifeq ($(ENABLE_ATP), 1)
+  SRC := $(SRC) atpInterface
+  REQUIRES := $(REQUIRES) atp
+endif
+
+ifeq ($(ENABLE_CSISAT), 1)
+  SRC := $(SRC) CSIsatInterface
+  REQUIRES := $(REQUIRES) csisat
+endif
+
+ifeq ($(ENABLE_CVC3), 1)
+  SRC := $(SRC) cvc3Interface
+endif
+
+ifeq ($(ENABLE_Z3), 1)
+  SRC := $(SRC) Z3Interface
+  REQUIRES := $(REQUIRES) z3
+endif
+
+ifeq ($(ENABLE_APRON), 1)
+  SRC := $(SRC) apronInterface
+  REQUIRES := $(REQUIRES) apron.apron apron.polkaMPQ # apron.ppl
+endif
+
+SRC := $(SRC) \
+       FPATConfig
+
+COMMA=,
+PP = -package $(subst $() ,$(COMMA),$(strip $(REQUIRES)))
+
+# main target
+#############
+
+NAME = fpat
+all: byte opt lib
+
+# bytecode and native-code compilation
+######################################
+
+C_OBJ = $(patsubst %, %.o, $(C_SRC))
+CMO = $(patsubst %, %.cmo, $(SRC))
+CMX = $(patsubst %, %.cmx, $(SRC))
+#LIBCMA := $(patsubst %, %.cma, $(LIB))
+#LIBCMXA := $(patsubst %, %.cmxa, $(LIB))
+
+CMA = $(NAME).cma
+CMXA = $(NAME).cmxa
+A = lib$(NAME).a
+
+$(CMX): OFLAGS += -for-pack Fpat
+
+byte: $(CMA)
+opt: $(CMXA)
+lib: $(A)
+
+$(NAME).cmo: $(CMO)
+	$(OCAMLFIND) ocamlc -pack -g -o $@ $(LIBCMA) $^
+
+$(NAME).cmx: $(CMX)
+	$(OCAMLFIND) ocamlopt -pack -o $@ $(LIBCMXA) $^
+
+$(CMA): $(NAME).cmo
+	$(OCAMLFIND) ocamlc -a -custom -g -o $@ $^
+
+$(CMXA): $(NAME).cmx
+	$(OCAMLFIND) ocamlopt -a -o $@ $^
+
+top : $(NAME).cmo
+	$(OCAMLFIND) ocamlmktop -annot $(PP) -linkpkg -o $(NAME) $^
+
+$(A) : $(C_OBJ)
+	$(OCAMLFIND) ocamlmklib -o $(NAME) $^
+
+
+# documentation
+###############
+
+DOCDIR   = doc
+DOC_SRC	 = $(CMO:.cmo=.ml) $(wildcard $(CMO:.cmo=.mli))
+
+.PHONY: doc dot ps depgraph
+
+$(DOCDIR)/index.html: $(DOC_SRC)
+	mkdir -p $(DOCDIR)
+	rm -f $(DOCDIR)/*.html
+	$(OCAMLFIND) ocamldoc $(INCLUDES) $(PP) -d $(DOCDIR) -html $(DOC_SRC)
+doc: $(DOCDIR)/index.html
+
+$(DOCDIR)/$(NAME).dot: $(DOC_SRC)
+	mkdir -p $(DOCDIR)
+	rm -f $(DOCDIR)/$(NAME).dot
+	$(OCAMLFIND) ocamldoc $(INCLUDES) $(PP) -o $@ -dot $(DOC_SRC)
+dot: $(DOCDIR)/$(NAME).dot
+
+$(DOCDIR)/$(NAME).ps: $(DOCDIR)/$(NAME).dot
+	dot -Tps $< > $@
+ps: $(DOCDIR)/$(NAME).ps
+
+depgraph: $(DOCDIR)/$(NAME).ps
+	gv $(DOCDIR)/$(NAME).ps
+
+# generic rules
+###############
+
+.SUFFIXES: .c .cpp .mli .ml .cmi .cmo .cmx .mll .mly
+
+.c.o:
+	$(CC) -c $(C_INCLUDES) $(C_OPT) $<
+#	$(CLANG) -c $(C_INCLUDES) $(C_OPT) $<
+
+.cpp.o:
+	$(CXX) -c $(C_INCLUDES) $(C_OPT) $<
+#	$(CLANG) -c $(C_INCLUDES) $(C_OPT) $<
+
+.mli.cmi:
+	$(OCAMLFIND) ocamlc $(INCLUDES) $(PP) -c $(BFLAGS) $<
+
+.ml.cmo:
+	$(OCAMLFIND) ocamlc $(INCLUDES) $(PP) -c $(BFLAGS) $<
+
+.ml.o:
+	$(OCAMLFIND) ocamlopt $(INCLUDES) $(PP) -c $(OFLAGS) $<
+
+.ml.cmx:
+	$(OCAMLFIND) ocamlopt $(INCLUDES) $(PP) -c $(OFLAGS) $<
+
+.mll.ml:
+	$(OCAMLLEX) $<
+
+.mly.ml:
+	$(OCAMLYACC) -v $<
+
+.mly.mli:
+	$(OCAMLYACC) -v $<
+
+# Makefile is rebuilt whenever Makefile.in or configure.in is modified
+######################################################################
+
+Makefile: Makefile.in config.status
+	@if test -e $@; then chmod a+w $@; fi
+	./config.status
+	chmod a-w $@
+
+config.status: configure
+	./config.status --recheck
+
+configure: configure.in
+	autoconf
+
+# clean
+#######
+
+clean:
+	rm -f *~
+	rm -f *.cm[iox] *.cmti *.cmt *.annot *.o
+	rm -f $(DOCDIR)/index.html
+	rm -f $(A) $(NAME).*a $(NAME).cm* $(NAME).o
+
+dist-clean distclean: clean
+	rm -f Makefile config.cache config.log config.status
+
+git-clean gitclean:
+	rm .gitignore
+	git clean -df
+	git checkout .gitignore
+
+# depend
+########
+
+PARSER=$(wildcard *.mly)
+
+.PHONY: depend
+.depend depend: $(PARSER:.mly=.ml)
+	$(OCAMLFIND) ocamldep $(INCLUDES) $(PP) $(addsuffix .ml,$(SRC)) *.mli *.mly > .depend
+
+-include .depend
+
+# project specific rules
+########################
+
+$(ATP)/atp_batch.cma:
+	cd $(ATP) && make all
+
+$(ATP)/atp_batch.cmxa:
+	cd $(ATP) && make all
+
+# install
+
+META: META.in Makefile
+	sed -e s/REQUIRES/"$(REQUIRES)"/ $@.in | \
+    sed -e s/CCOPT/"$(CCOPT)"/ > $@
+
+install-lib: $(ATP)/atp_batch.cma $(ATP)/atp_batch.cmxa
+	@if [ "$(ENABLE_ATP)" = "1" ]; then \
+	  $(OCAMLFIND) remove atp; \
+	  $(OCAMLFIND) install atp \
+		$(ATP)/META \
+		$(ATP)/atp_batch.a \
+		$(ATP)/atp_batch.cmi \
+		$(ATP)/atp_batch.cma \
+		$(ATP)/atp_batch.cmxa; \
+	fi
+	@if [ "$(ENABLE_CSISAT)" = "1" ]; then \
+	  $(OCAMLFIND) remove csisat; \
+	  $(OCAMLFIND) install csisat \
+		csisat/META \
+		$(CSISAT)/obj/* \
+		$(CSISAT)/lib/*; \
+	fi
+
+install: META
+	$(OCAMLFIND) remove fpat
+	$(OCAMLFIND) install fpat \
+		META fpat.a fpat.cmi $(CMA) $(CMXA) $(A)

@@ -1,0 +1,7 @@
+name="fpat"
+description="A framework for program analysis and transformation"
+version="0.2.0"
+requires = "str unix bigarray num batteries zarith atp csisat z3 apron.apron apron.polkaMPQ "
+archive(byte)="fpat.cma"
+archive(native)="fpat.cmxa"
+linkopts = "-cclib -lfpat "

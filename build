@@ -1,0 +1,7 @@
+#!/bin/bash -eu
+
+autoconf
+./configure
+make install-lib
+make -B depend
+make

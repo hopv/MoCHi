@@ -1,0 +1,19 @@
+How to build MoCHi
+==================
+
+ Install the required tools/libraries listed below,
+ and run "bash build", which generates "mochi.opt".
+
+
+What do you need?
+=================
+
+- OCaml compiler (from 4.03 to 4.08)
+- Libraries available via OPAM
+  - ocamlfind/findlib
+  - Z3 4.7.1
+  - ppx_deriving
+  - Yojson
+  - batteries
+- CVC3 binary
+- TRecS or HorSat binary
