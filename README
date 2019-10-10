@@ -15,6 +15,10 @@ What do you need?
   - ppx_deriving
   - Yojson
   - batteries
+  - camlp4
+  - camlp5
+  - zarith
+  - apron
 - HorSat2 binary (https://github.com/hopv/horsat2)
   * Put the binary in the path or the same directory of MoCHi's source code
 
