@@ -20,7 +20,6 @@ What do you need?
   - zarith
   - apron
 - HorSat2 binary (https://github.com/hopv/horsat2)
-  * Put the binary in the path or the same directory of MoCHi's source code
 
 
 Dockerfile
