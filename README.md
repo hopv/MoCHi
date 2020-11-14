@@ -2,7 +2,7 @@ How to build MoCHi
 ==================
 
  Install the required tools/libraries listed below,
- and run "bash build", which generates "mochi.exe".
+ and run "bash build", which generates "src/mochi.exe".
 
 
 What do you need?
