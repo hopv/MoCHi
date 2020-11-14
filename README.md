@@ -2,25 +2,28 @@ How to build MoCHi
 ==================
 
  Install the required tools/libraries listed below,
- and run "bash build", which generates "mochi.opt".
+ and run "bash build", which generates "mochi.exe".
 
 
 What do you need?
 =================
 
-- OCaml compiler (from 4.03 to 4.08)
-- Libraries available via OPAM
-  - ocamlfind/findlib
-  - Z3 4.7.1
-  - ppx_deriving
-  - Yojson
-  - batteries
-  - camlp4
-  - camlp5
-  - zarith
-  - apron
+- OCaml 4.09, 4.10, or 4.11
+- Tools/Libraries available via opam 2
+  (Run "opam install z3 dune batteries ocamlfind ppx_deriving yojson camlp5 zarith apron menhir")
+    - Z3 4.8.9
+    - dune 2.5
+    - batteries 3.0.0
+    - ocamlfind/findlib
+    - ppx_deriving
+    - Yojson
+    - camlp5
+    - zarith
+    - apron
+    - Menhir
 - HorSat2 binary (https://github.com/hopv/horsat2)
-
+- HoIce binary (https://github.com/hopv/hoice)
+    - HoIce is not necessary to run MoCHi, but the lack of HoIce may degrade the performance. (See [Sato+ PEPM2019])
 
 Dockerfile
 ==========
@@ -43,7 +46,7 @@ Licenses
 Author
 =======
 
- MoCHi is developed/maintained by Ryosuke SATO <sato@ait.kyushu-u.ac.jp>
+ MoCHi is developed/maintained by Ryosuke SATO <rsato@is.s.u-tokyo.ac.jp>
 
 
 Contributors

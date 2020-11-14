@@ -59,7 +59,7 @@ let block ?(timeout = 0) before after main =
          if timeout > 0 then
            begin
              let old_handler = Sys.signal Sys.sigalrm sigalrm_handler in
-             Unix.alarm timeout;
+             ignore @@ Unix.alarm timeout;
              fun () -> Sys.set_signal Sys.sigalrm old_handler
            end
          else fun () -> ()
@@ -68,4 +68,4 @@ let block ?(timeout = 0) before after main =
          let ret = main () in
          reset_sigalrm_handler ();
          stop (), ret
-       with exc -> reset_sigalrm_handler (); stop (); raise exc)
+       with exc -> reset_sigalrm_handler (); ignore @@ stop (); raise exc)

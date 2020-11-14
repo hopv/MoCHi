@@ -155,7 +155,22 @@ let of_term =
           (r1 var_tenv bind_tenv)
           (r2 var_tenv bind_tenv)
       method fufun ty x rs = fun var_tenv bind_tenv ->
-        raise (Global.NotImplemented "fufun in Z3Interface.of_term")
+        try
+          if rs <> [] then raise Not_found;
+          let i, (_, ty) = List.findi (fun _ -> fst >> (=) x) bind_tenv in
+          Quantifier.mk_bound ctx i ty
+        with Not_found ->
+          let ty = TypEnv.lookup var_tenv x |> SMTProver.instantiate_type in
+          let sym = sym_of_var x in
+          if rs <> [] then
+            let args, ret = Type.args_ret ty in
+            FuncDecl.apply
+              (FuncDecl.mk_func_decl ctx
+                 sym
+                 (List.map of_type args)
+                 (of_type ret))
+              (List.map (fun r -> r var_tenv bind_tenv) rs)
+          else Expr.mk_const ctx sym (ty |> of_type)
       method fcoerce _ r = fun var_tenv bind_tenv ->
         Z3.Arithmetic.Integer.mk_int2real ctx (r var_tenv bind_tenv)
       method fformula = !of_formula'
@@ -277,7 +292,10 @@ let of_sort s =
 let rec term_of expr =
   try
     if Arithmetic.is_int_numeral expr then
-      Arithmetic.Integer.get_int expr |> IntTerm.make
+      expr
+      |> Arithmetic.Integer.get_big_int
+      |> Big_int_Z.int_of_big_int
+      |> IntTerm.make
     else if Expr.is_const expr then
       Expr.to_string expr
       |> Idnt.deserialize
@@ -379,8 +397,6 @@ let term_of_model model expr =
     let n =
       value
       |> Arithmetic.Integer.get_big_int
-      |> Big_int.string_of_big_int
-      |> Big_int_Z.big_int_of_string
     in
     begin
       try n |> Big_int_Z.int_of_big_int |> IntTerm.make
@@ -414,7 +430,7 @@ let rec formula_of p =
         | Z3enums.BOOL_SORT ->
             let t1 = formula_of zt1 in
             let t2 = formula_of zt2 in
-            let ty = of_sort sort in
+            let _ty = of_sort sort in
             Formula.mk_iff t1 t2
         | _ -> raise (Global.NotImplemented "eq in Z3Interface.formula_of"))
   else if Arithmetic.is_le p then
@@ -500,7 +516,6 @@ let rec formula_of p =
         | Z3enums.QUANTIFIER_AST -> "QUANTIFIER_AST"
         | Z3enums.VAR_AST -> "VAR_AST"
         | Z3enums.UNKNOWN_AST -> "UNKNOWN_AST"
-        | _ -> "Not matched: to_string"
       in
       let to_typterm sorts args =
         assert (List.length sorts = List.length args);
@@ -834,13 +849,8 @@ let solve_labeled =
     solve_labeled
 
 let interpolate phi1 phi2 =
-  let tenv, _ = SimTypInfer.infer_formula [] (Formula.band [phi1; phi2]) in
-  let p1 = of_formula phi1 tenv [] in
-  let p2 = of_formula phi2 tenv [] in
-  let pat = Boolean.mk_and ctx [Interpolation.mk_interpolant ctx p1; p2] in
-  match Interpolation.compute_interpolant ctx pat (Params.mk_params ctx) with
-  | _, Some(astv), _ -> List.hd astv |> formula_of
-  | _ -> raise InterpProver.NoInterpolant
+  Format.eprintf "Interpolation by Z3 is not supported@.";
+  assert false
 
 let interpolate_z3 p =
   interpolate

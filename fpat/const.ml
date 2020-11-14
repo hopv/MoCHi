@@ -181,6 +181,7 @@ let string_of = function
   | Top -> "top"
   (**)
   | Coerce ty -> "coerce[" ^ Type.string_of ty ^ "]"
+  | UFun(_, x) -> Idnt.string_of x
   | _ -> "(?undef:\"const.ml\")"(*assert false*)
 
 let tex_string_of = function

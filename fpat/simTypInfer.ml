@@ -263,7 +263,6 @@ let infer_formula tenv phi =
     tenv
     @ (Formula.fvs phi @ Formula.coeffs phi @ CunFormula.ufuns_of phi
        |> List.filter (flip List.mem_assoc tenv >> not)
-       |> List.unique
        |> TypEnv.of_vars)
   in
   let constr, phi' = cgen_formula tenv' phi in

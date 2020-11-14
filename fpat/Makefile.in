@@ -22,8 +22,8 @@ ENABLE_ATP = @ENABLE_ATP@
 ENABLE_APRON = @ENABLE_APRON@
 
 # Normal compilation options
-BFLAGS = -g -w -8 -bin-annot -annot #-noassert #-thread
-OFLAGS = -w -8 -bin-annot -annot #-noassert #-thread
+BFLAGS = -g -w -8 -bin-annot -annot -thread #-noassert
+OFLAGS = -w -8 -bin-annot -annot -thread #-noassert
 
 # Archiving options
 CCOPT =
@@ -84,7 +84,7 @@ SRC := $(SRC) \
 
 # SMT Solvers
 SRC := $(SRC) \
-       SMTProver
+       setTheory SMTProver
 
 # Atomic formulas
 SRC := $(SRC) \
@@ -370,13 +370,6 @@ install-lib: $(ATP)/atp_batch.cma $(ATP)/atp_batch.cmxa
 		$(ATP)/atp_batch.cmi \
 		$(ATP)/atp_batch.cma \
 		$(ATP)/atp_batch.cmxa; \
-	fi
-	@if [ "$(ENABLE_CSISAT)" = "1" ]; then \
-	  $(OCAMLFIND) remove csisat; \
-	  $(OCAMLFIND) install csisat \
-		csisat/META \
-		$(CSISAT)/obj/* \
-		$(CSISAT)/lib/*; \
 	fi
 
 install: META

@@ -66,7 +66,6 @@ module Make = functor(Binder : BINDER) -> functor(Const : CONST) -> struct
   let let_fun_args t k =
     match fun_args t with
     | f, args -> k f args
-    | _ -> raise (Global.NoMatch "let_fun_args")
 
   let let_binder t k =
     match t with

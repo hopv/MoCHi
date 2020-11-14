@@ -45,3 +45,5 @@ val interpolate_z3_dyn : (Idnt.t -> bool) -> t
 val link_dyn : ((Idnt.t -> bool) -> t) -> unit
 val get_dyn : unit -> ((Idnt.t -> bool) -> t)
 val interpolate_dyn : (Idnt.t -> bool) -> t
+
+val use_set_theory : unit -> unit

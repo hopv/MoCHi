@@ -195,7 +195,7 @@ let of_term =
       method fproj _ _ _ = assert false
       method fkon _ _ _ = assert false
       method faccessor _ _ _ _ = assert false
-      method fufun _ _ _ = assert false
+      method fufun _ x rs = CsisatAst.Application(Idnt.string_of x, rs)
       method fsempty ty = assert false
       method fsadd ty r1 r2 = assert false
       method fsunion ty r1 r2 = assert false
@@ -225,7 +225,10 @@ let of_atom =
       method frecognizer ty x t1 = assert false
       method fsmem ty e s = assert false
       method fssubset ty s1 s2 =  assert false
-      method fterm c ts = assert false
+      method fterm c ts =
+        match c with
+        | Const.UFun(_ty,x) -> CsisatAst.(Eq(csisat_true,Application(Idnt.string_of x, List.map of_term ts)))
+        | _ -> assert false
     end)
 
 let of_formula =
@@ -268,6 +271,10 @@ let rec term_of s =
     Formula.term_of Formula.mk_true, Type.mk_bool
   | CsisatAst.Application(_, _) when s = csisat_false ->
     Formula.term_of Formula.mk_false, Type.mk_bool
+  | CsisatAst.Application("mem", [s1;s2]) ->
+      let t1,_ = term_of s1 in
+      let t2,_ = term_of s2 in
+      Formula.term_of (Formula.mk_atom SetTheory.mem [t1;t2]), Type.mk_bool
   | CsisatAst.Sum(ss) ->
     let ty' =
       if !InterpProver.csisat_int_mode

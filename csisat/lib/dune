@@ -1,0 +1,9 @@
+(include_subdirs unqualified)
+
+(library
+  (name libcsisat)
+  (public_name csisat)
+  (foreign_stubs (language c) (names camlglpk_stubs))
+  (c_library_flags (-lglpk))
+  (flags (:standard -w -a))
+  (wrapped false))

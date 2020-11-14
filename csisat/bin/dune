@@ -1,0 +1,4 @@
+(executable
+ (name csisatMain)
+ (libraries csisat)
+ (flags (:standard -w -a)))

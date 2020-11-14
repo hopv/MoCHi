@@ -1,0 +1,2 @@
+(dirs src)
+(data_only_dirs csisat)

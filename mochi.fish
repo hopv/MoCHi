@@ -13,4 +13,6 @@ complete -c mochi -o trans -x -a "(mochi -trans-list)"
 complete -c mochi -x -a "(
 __fish_complete_suffix .ml
 __fish_complete_suffix .cegar
+__fish_complete_suffix .spec
+__fish_complete_suffix .bin
 )"

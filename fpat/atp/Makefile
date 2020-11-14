@@ -11,8 +11,6 @@
 # Use camlp5 for versions of OCaml >= 3.10
 # Download this from http://pauillac.inria.fr/~ddr/camlp5/
 
-USE_CAMLP5=true
-
 MLFILES = initialization.ml lib.ml intro.ml formulas.ml prop.ml propexamples.ml           \
           defcnf.ml dp.ml stal.ml bdd.ml fol.ml skolem.ml               \
           herbrand.ml unif.ml tableaux.ml resolution.ml prolog.ml       \
@@ -37,40 +35,26 @@ interactive: atp_interactive.ml init.ml; echo '#use "init.ml";;' >.ocamlinit; (s
 
 # Build a bytecode executable
 
-bytecode: example.ml atp_batch.cmo;                                                                             \
-                if ${USE_CAMLP5};                                                                               \
-                then ocamlc -pp "camlp5o ./Quotexpander.cmo" -o example nums.cma atp_batch.cmo example.ml;      \
-                else ocamlc -pp "camlp4o ./Quotexpander.cmo" -o example nums.cma atp_batch.cmo example.ml;      \
-                fi
+bytecode: example.ml atp_batch.cmo
+	ocamlc -pp "camlp5o ./Quotexpander.cmo" -o example nums.cma atp_batch.cmo example.ml
 
 # Alternatively, produce native code
 
-compiled: example.ml atp_batch.cmx;                                                                             \
-                if ${USE_CAMLP5};                                                                               \
-                then ocamlopt -pp "camlp5o ./Quotexpander.cmo" -o example nums.cmxa atp_batch.cmx example.ml;   \
-                else ocamlopt -pp "camlp4o ./Quotexpander.cmo" -o example nums.cmxa atp_batch.cmx example.ml;   \
-                fi
+compiled: example.ml atp_batch.cmx
+	ocamlopt -pp "camlp5o ./Quotexpander.cmo" -o example nums.cmxa atp_batch.cmx example.ml
 
 # Make the appropriate object for the main body of code
 
-atp_batch.cmx: Quotexpander.cmo atp_batch.ml;                                                                   \
-                if ${USE_CAMLP5};                                                                               \
-                then ocamlopt -pp "camlp5o ./Quotexpander.cmo" -w ax -c atp_batch.ml;                           \
-                else ocamlopt -pp "camlp4o ./Quotexpander.cmo" -w ax -c atp_batch.ml;                           \
-                fi
+atp_batch.cmx: Quotexpander.cmo atp_batch.ml
+	ocamlopt -pp "camlp5o ./Quotexpander.cmo" -w ax -c atp_batch.ml
 
-atp_batch.cmo: Quotexpander.cmo atp_batch.ml;                                                                   \
-                if ${USE_CAMLP5};                                                                               \
-                then ocamlc -pp "camlp5o ./Quotexpander.cmo" -w ax -c atp_batch.ml;                             \
-                else ocamlc -pp "camlp4o ./Quotexpander.cmo" -w ax -c atp_batch.ml;                             \
-                fi
+atp_batch.cmo: Quotexpander.cmo atp_batch.ml
+	ocamlc -pp "camlp5o ./Quotexpander.cmo" -w ax -c atp_batch.ml
 
 # Make the camlp4 or camlp5 quotation expander
 
-Quotexpander.cmo: Quotexpander.ml; if ${USE_CAMLP5};                                                            \
-                                    then ocamlfind ocamlc -package camlp5 -c Quotexpander.ml;                                  \
-                                    else ocamlfind ocamlc -package camlp4 -c Quotexpander.ml;                                  \
-                                    fi
+Quotexpander.cmo: Quotexpander.ml
+	ocamlfind ocamlc -package camlp5 -c Quotexpander.ml
 
 # Extract the non-interactive part of the code
 

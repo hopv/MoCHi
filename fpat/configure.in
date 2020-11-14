@@ -22,13 +22,6 @@ else
         AC_MSG_ERROR(Cannot find zarith)
     fi
 
-    CAMLP4=`ocamlfind query camlp4 | tr -d '\\r'`
-    if test $CAMLP4; then
-        echo "camlp4 detected"
-    else
-        AC_MSG_ERROR(Cannot find camlp4)
-    fi
-
     CAMLP5=`ocamlfind query camlp5 | tr -d '\\r'`
     if test $CAMLP5; then
         echo "camlp5 detected"

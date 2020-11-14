@@ -120,3 +120,5 @@ let link_dyn ip = ext_interpolate := ip
 let get_dyn () = !ext_interpolate
 let interpolate_dyn p phi1 phi2 =
   Logger.log_block3 "InterpProver.interpolate_dyn" !ext_interpolate p phi1 phi2
+
+let use_set_theory () = ext_interpolate := SetTheory.wrap_ip !ext_interpolate

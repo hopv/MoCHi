@@ -469,7 +469,9 @@ let ufuns_of f_formula =
       method fbrel _ t1 t2 =
         CunTerm.ufuns_of f_formula t1 @ CunTerm.ufuns_of f_formula t2
       method fdivides _ t1 = CunTerm.ufuns_of f_formula t1
-      method fterm c ts = List.concat_map (CunTerm.ufuns_of f_formula) ts
+      method fterm c ts =
+        (match c with Const.UFun(_,x) -> [x] | _ -> []) @
+        List.concat_map (CunTerm.ufuns_of f_formula) ts
     end)
 
 (* assume NNF *)

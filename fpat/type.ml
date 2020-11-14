@@ -297,7 +297,7 @@ let rec meet ty1 ty2 =
     mk_fun [meet ty11 ty21; meet ty12 ty22]
   | _, _ ->
     (*@todo use intersection types*)
-    Format.printf "Type.meet: ty1: %a, ty2: %a@." pr ty1 pr ty2;
+    Format.eprintf "Type.meet: ty1: %a, ty2: %a@." pr ty1 pr ty2;
     Logger.print_fpat_call_stack ();
     assert false
 let meet_list = List.fold_left meet (Const TypConst.Top)

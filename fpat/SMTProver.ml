@@ -105,3 +105,5 @@ let find_min_sat_dyn phi x = !ext_find_min_sat phi x
 
 let init_z3 () = default := !z3
 let init_cvc3 () = default := !cvc3
+
+let use_set_theory () = default := SetTheory.wrap_smt_prover !default

@@ -229,8 +229,8 @@ let body_fvs_bool body =
   |> List.unique
 let body_fvs_ty body =
   body.pvas
-  |> List.concat_map Pva.fvs_ty
-  |> (@) (Formula.fvs_ty body.phi)
+  |> List.concat_map (fun pva -> Pva.fvs_ty pva)
+  |> (@) (let r = Formula.fvs_ty body.phi in  r)
   |> TypEnv.merge
 
 let pat_match_head h1 h2 =

@@ -39,6 +39,7 @@ let cgen t ty =
             | _ ->
               let ty = Const.type_of c in
               Logger.printf2 "c: %a  ty: %a@," (Const.pr []) c Type.pr ty;
+              Logger.printf "  ts: %a@," (List.pr Term.pr ", ") ts;
               assert (not (Type.is_unknown ty));
               ty |> Type.args_ret
           in

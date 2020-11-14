@@ -3,5 +3,4 @@
 autoconf
 ./configure
 make install-lib
-make -B depend
 make

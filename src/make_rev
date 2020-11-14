@@ -1,0 +1,17 @@
+#!/bin/sh
+
+TARGET=revision.ml
+
+echo > $TARGET
+
+if [ $# -eq 1 ]; then
+	echo -n 'let mochi = Some ("' >> $TARGET
+	if [ `$1 diff | wc -w` != 0 ]; then echo -n _ >> $TARGET; fi
+	echo -n `$1 rev-parse --short HEAD` >> $TARGET
+	echo -n '", "' >> $TARGET
+	if [ `$1 diff | wc -w` != 0 ]; then echo -n "after " >> $TARGET; fi
+	$1 log --date=iso --pretty=format:"%ad" -1 >> $TARGET
+	echo '")' >> $TARGET
+else
+	echo "let mochi = None" >> $TARGET
+fi

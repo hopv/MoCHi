@@ -117,6 +117,7 @@ let arg_spec =
    "-degree", Arg.Int (fun d -> InterpProver.degree := d; Template.degree := d),
      " Set the degree of interpolants";
    (* SMT solvers *)
+   "-set-theory", Arg.Unit (SMTProver.use_set_theory >> InterpProver.use_set_theory), "Use after -smt";
    "-smt", Arg.String (function
        | "z3" -> SMTProver.init_z3 ()
        | "cvc3" -> SMTProver.init_cvc3 ()
