@@ -3,7 +3,7 @@ FROM ubuntu:20.04
 ARG ocaml_ver=4.09.1
 
 RUN apt-get update && \
-    apt-get install -y git make gcc m4 opam libgmp-dev libmpfr-dev libglpk-dev autoconf
+    apt-get install -y git make gcc m4 opam libgmp-dev libmpfr-dev libglpk-dev autoconf libipc-system-simple-perl libstring-shellquote-perl
 
 RUN useradd -m mochi
 USER mochi

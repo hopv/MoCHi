@@ -1,14 +1,25 @@
 How to build MoCHi
 ==================
 
- Install the required tools/libraries listed below,
- and run "bash build", which generates "src/mochi.exe".
+ Install the required tools/libraries listed below, then run
+
+ ```
+autoconf -i
+bash build
+ ```
+
+ It will generate `src/mochi.exe`
 
 
 What do you need?
 =================
 
 - OCaml 4.09, 4.10, or 4.11
+- Install Some Libraries
+```
+apt-get update
+apt-get install -y git make gcc m4 opam libgmp-dev libmpfr-dev libglpk-dev autoconf libipc-system-simple-perl libstring-shellquote-perl
+```
 - Tools/Libraries available via opam 2
   (Run "opam install z3 dune batteries ocamlfind ppx_deriving yojson camlp5 zarith apron menhir")
     - Z3 4.8.9
