@@ -3,10 +3,10 @@ How to build MoCHi
 
  Install the required tools/libraries listed below, then run
 
- ```
+```
 autoconf -i
 bash build
- ```
+```
 
  It will generate `src/mochi.exe`
 
