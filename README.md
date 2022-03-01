@@ -21,6 +21,7 @@ What do you need?
     - zarith
     - apron
     - Menhir
+- Standard system tools (See the Dockerfile or run "apt-get install -y git make gcc m4 opam libgmp-dev libmpfr-dev libglpk-dev autoconf")
 - HorSat2 binary (https://github.com/hopv/horsat2)
 - HoIce binary (https://github.com/hopv/hoice)
     - HoIce is not necessary to run MoCHi, but the lack of HoIce may degrade the performance. (See [Sato+ PEPM2019])
