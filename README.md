@@ -1,3 +1,5 @@
+[![Docker Image CI](https://github.com/hopv/MoCHi/actions/workflows/docker-image.yml/badge.svg)](https://github.com/hopv/MoCHi/actions/workflows/docker-image.yml)
+
 MoCHi is a software model checker for OCaml.
 MoCHi is based on higher-order model checking, predicate abstraction, and CEGAR.
 
