@@ -17,6 +17,7 @@ What do you need?
 - OCaml >=4.08.0 & <5.0.0
 - opam >=2.1
 - Git
+- Autoconf
 - Tools/Libraries available via opam
   (Run "opam install . --deps-only -y")
     - Z3 >=4.8.9
