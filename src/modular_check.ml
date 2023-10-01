@@ -2,6 +2,7 @@ open Util
 open Syntax
 open Term_util
 open Type
+open Type_util
 open Modular_common
 
 
@@ -13,18 +14,17 @@ let to_CEGAR_ref_type_base base =
   | TUnit -> CEGAR_ref_type.Unit
   | TBool -> CEGAR_ref_type.Bool
   | TInt -> CEGAR_ref_type.Int
-  | TPrim s -> CEGAR_ref_type.Abst s
 let rec to_CEGAR_ref_type typ =
   match typ with
   | Ref_type.Base(base, x, p) -> CEGAR_ref_type.Base(to_CEGAR_ref_type_base base, Id.to_string x, snd @@ CEGAR_trans.trans_term p)
-  | Ref_type.ADT(_, _, _) -> assert false (* XXX tekitou *)
+  | Ref_type.Constr _ -> assert false
   | Ref_type.Fun(x, typ1, typ2) -> CEGAR_ref_type.Fun(Id.to_string x, to_CEGAR_ref_type typ1, to_CEGAR_ref_type typ2)
   | Ref_type.Inter(styp, typs) -> CEGAR_ref_type.Inter(CEGAR_trans.trans_typ styp, List.map to_CEGAR_ref_type typs)
   | _ -> unsupported "Ref_type.to_CEGAR_ref_type"
 
 
 
-let bool_of_term' t = Option.try_any (fun _ -> bool_of_term t)
+let bool_of_term' t = Option.try_with_any (fun _ -> bool_of_term t)
 
 let merge_paths path1 path2 = path1 @ path2
 
@@ -56,8 +56,8 @@ and print_value n fm vl =
 let print_val_env fm ans = print_val_env 1 fm ans
 let print_value fm ans = print_value 1 fm ans
 
-let counter = Counter.create ()
-let new_label () = Counter.gen counter
+let counter = new counter
+let new_label () = counter#gen
 
 
 let get_label = get_id_option
@@ -100,7 +100,8 @@ and eval
       | Not _
       | Fun _
       | Event _ -> Closure(val_env, t), ce, []
-      | Var x -> Id.assoc x val_env, ce, []
+      | Var (LId x) -> Id.List.assoc x val_env, ce, []
+      | Var _ -> unsupported "%s" __FUNCTION__
       | App(t, []) -> eval val_env ce t
       | App(t1, ts) ->
           let ts',t2 = List.decomp_snoc ts in
@@ -202,18 +203,17 @@ type result =
 
 let add_context prog f xs t typ =
   let dbg = 0=0 in
-  let {fun_typ_env=env; exn_decl} = prog in
+  let {fun_typ_env=env} = prog in
   if dbg then Debug.printf "ADD_CONTEXT prog: %a@." print_prog prog;
   if dbg then Debug.printf "ADD_CONTEXT: %a :? %a@." Print.id f Ref_type.print typ;
   let fs =
     List.Set.diff ~eq:Id.eq (get_fv t) (f::xs)
   in
-  let af = "Assert_failure" in
-  let etyp = TVariant(false,exn_decl@[af,[]]) in
+  let af,etyp = make_etyp prog in
   let typ_exn = Encode.typ_of Encode.all etyp in
   let make_fail typ =
     make_fail typ
-    |> Trans.replace_fail ~by:(Raise(make_construct af [] etyp))
+    |> Trans.replace_fail ~by:(Raise(make_construct (Type.LId af) [] etyp))
     |> Problem.safety
     |> Encode.all
     |> Problem.term
@@ -229,7 +229,7 @@ let add_context prog f xs t typ =
   let fun_env' =
     let make = Pair.map_snd @@ Triple.trd -| Ref_type_gen.generate (Some typ_exn) ~make_fail [] [] in
     env
-    |> Ref_type.Env.filter_key (Id.mem -$- fs)
+    |> Ref_type.Env.filter_key (Id.List.mem -$- fs)
     |> Ref_type.Env.to_list
     |> List.map make
     |@dbg&> Debug.printf "ADD_CONTEXT fun_env': %a@." print_def_env
@@ -242,30 +242,30 @@ let add_context prog f xs t typ =
   t', fun_env''
 
 let complete_ce_set f t ce =
-  let let_fun_var = make_col [] (@@@) in
+  let let_fun_var = Col.make [] (@@@) in
   let let_fun_var_desc desc =
     match desc with
     | Local(Decl_let bindings,t) ->
         let aux (f,t) =
           let xs,t = decomp_funs t in
-          let fs = let_fun_var.col_term t in
+          let fs = let_fun_var.term t in
           if xs = [] then
             fs
           else
             f::fs
         in
-        let_fun_var.col_term t @@@ List.rev_map_flatten aux bindings
-    | _ -> let_fun_var.col_desc_rec desc
+        let_fun_var.term t @@@ List.rev_map_flatten aux bindings
+    | _ -> let_fun_var.desc_rec desc
   in
-  let_fun_var.col_desc <- let_fun_var_desc;
-  let fs = f :: let_fun_var.col_term t in
-  List.map (fun f -> f, if Id.mem_assoc f ce then Id.assoc f ce else []) fs
+  let_fun_var.desc <- let_fun_var_desc;
+  let fs = f :: let_fun_var.term t in
+  List.map (fun f -> f, if Id.List.mem_assoc f ce then Id.List.assoc f ce else []) fs
 
 let make_init_ce_set f t =
   f, complete_ce_set f t []
 
 let check_simple f ty prog =
-  let t = Id.assoc f prog.fun_def_env in
+  let t = Id.List.assoc f prog.fun_def_env in
   let fv = get_fv t in
   let env =
     prog.fun_typ_env
@@ -287,10 +287,10 @@ let check prog f typ depth =
   else
     let {fun_typ_env=env; fun_def_env=fun_env} = prog in
     let t,fun_env' =
-      let xs, t = decomp_funs @@ Id.assoc f prog.fun_def_env in
+      let xs, t = decomp_funs @@ Id.List.assoc f prog.fun_def_env in
       let t' =
         let fs = List.filter_out (Id.same f) @@ take_funs_of_depth fun_env f depth in
-        let fun_env' = List.filter (fst |- Id.mem -$- fs) fun_env in
+        let fun_env' = List.filter (fst |- Id.List.mem -$- fs) fun_env in
         make_lets fun_env' t
       in
       add_context prog f xs t' typ
@@ -318,7 +318,9 @@ let check prog f typ depth =
       |> Trans.map_main Term.(seq -$- eod) (* ??? *)
       |> Problem.safety
       |@> Debug.printf "Problem: %a@.@." Problem.print
+      |> Option.some
       |> Main_loop.loop ~make_pps:Preprocess.(all |- and_after CPS) ~fun_list:[]
+      |> snd
       |> List.get
     in
     match result with
@@ -328,7 +330,7 @@ let check prog f typ depth =
         let env' = (f,typ) :: Main_loop.trans_env (List.map fst fun_env) make_get_rtyp env in
         Debug.printf "  env': %a@." (List.print @@ Pair.print Id.print Ref_type.print) env';
         Typable (Ref_type.Env.normalize @@ Ref_type.Env.of_list env')
-    | CEGAR.Unsafe(sol, ModelCheck.CESafety ce_single) ->
+    | CEGAR.Unsafe(sol, Model_check.CESafety ce_single) ->
         let ce_single' = List.map ((=) 0) ce_single in
         if !!Debug.check then Main_loop.report_unsafe main sol set_main;
         Debug.printf "  Untypable@.@.";

@@ -1,17 +1,24 @@
 #!/bin/sh
 
 TARGET=revision.ml
+ECHO=/bin/echo
 
-echo > $TARGET
+$ECHO > $TARGET
+
+HASH=`git describe --always --dirty`
 
 if [ $# -eq 1 ]; then
-	echo -n 'let mochi = Some ("' >> $TARGET
-	if [ `$1 diff | wc -w` != 0 ]; then echo -n _ >> $TARGET; fi
-	echo -n `$1 rev-parse --short HEAD` >> $TARGET
-	echo -n '", "' >> $TARGET
-	if [ `$1 diff | wc -w` != 0 ]; then echo -n "after " >> $TARGET; fi
-	$1 log --date=iso --pretty=format:"%ad" -1 >> $TARGET
-	echo '")' >> $TARGET
+    cat << EOS >> $TARGET
+let mochi =
+  let s =
+    let ver = "%%VERSION%%" in
+    if BatString.starts_with ver "%%VERSION%" then
+      "$HASH"
+    else
+      ver
+  in
+  Some s
+EOS
 else
-	echo "let mochi = None" >> $TARGET
+    $ECHO 'let mochi = None' >> $TARGET
 fi

@@ -5,16 +5,16 @@ open Term_util
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
 
-let normalize = make_trans ()
+let normalize = Tr.make ()
 let normalize_term t =
-  let t' = normalize.tr_term_rec t in
+  let t' = normalize.term_rec t in
   match t'.desc with
   | App(t1, ts) ->
-      let aux t1 t2 = {(make_app t1 [t2]) with desc = App(t1, [t2])} in
+      let aux t1 t2 = make_app_raw t1 [t2] in
       List.fold_left aux t1 ts
   | _ -> t'
-let () = normalize.tr_term <- normalize_term
-let normalize = normalize.tr_term
+let () = normalize.term <- normalize_term
+let normalize = normalize.term
 
 
 let add_flow flow t1 t2 =
@@ -34,13 +34,14 @@ let get_flow map flow t =
   |> IntSet.elements
   |> List.map (Hashtbl.find map)
 
-let update_var = make_col2 false (||)
+let update_var = Col2.make false (||)
 let update_var_term (flow,x,t') t =
   match t.desc with
-  | Var y when Id.(x = y) -> add_flow flow t t'
-  | _ -> update_var.col2_term_rec (flow,x,t') t
-let () = update_var.col2_term <- update_var_term
-let update_var flow x t' t = update_var.col2_term (flow,x,t') t
+  | Var (LId y) when Id.(x = y) -> add_flow flow t t'
+  | Var _ -> unsupported "CFA"
+  | _ -> update_var.term_rec (flow,x,t') t
+let () = update_var.term <- update_var_term
+let update_var flow x t' t = update_var.term (flow,x,t') t
 
 let rec update map flow t =
   let (||) = (||) in (* for strictness *)
@@ -98,22 +99,30 @@ let cfa t =
 
 
 let replace_const =
-  let tr = make_trans2 () in
+  let tr = Tr2.make () in
   let replace_const_term (flow,map) t =
     match t.desc with
-    | Var x ->
+    | Var (LId x) ->
         let ts = get_flow map flow t in
-        if List.for_all (fun t -> match t.desc with Const _ -> true | Var y -> Id.(x = y) | _ -> false) ts then
+        let check t =
+          match t.desc with
+          | Const _ -> true
+          | Var (LId y) -> Id.(x = y)
+          | Var _ -> unsupported "CFA"
+          | _ -> false
+        in
+        if List.for_all check ts then
           let cs = List.filter_map (fun t -> match t.desc with Const c -> Some c | _ -> None) ts in
           match cs with
-          | c::cs' when List.for_all ((=) c) cs' -> {t with desc=Const c}
+          | c::cs' when List.for_all ((=) c) cs' -> make (Const c) t.typ
           | _ -> t
         else
           t
-    | _ -> tr.tr2_term_rec (flow,map) t
+    | Var _ -> unsupported "CFA"
+    | _ -> tr.term_rec (flow,map) t
   in
-  tr.tr2_term <- replace_const_term;
+  tr.term <- replace_const_term;
   Problem.map (cfa
-               |- Fun.uncurry tr.tr2_term
+               |- Fun.uncurry tr.term
                |- Trans.remove_id
                |- Trans.reconstruct)

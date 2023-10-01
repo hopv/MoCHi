@@ -13,7 +13,7 @@ let rec col_app c t =
       assert (col_app c t2 = []);
       [t1,t2]
   | App(t1, t2) -> col_app c t1 @@@ col_app c t2
-  | _ -> Format.printf "%a@." CEGAR_print.term t; assert false
+  | _ -> Format.fprintf !Flag.Print.target "%a@." CEGAR_print.term t; assert false
 
 (* forall x. x ∉ ∅ *)
 let theory_empty t =

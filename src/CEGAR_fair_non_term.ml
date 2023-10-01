@@ -29,7 +29,7 @@ let apply s children =
   List.fold_left (fun e1 e2 -> Apply (e1, e2)) (Var s) children
 
 (**
-   exprをn回くらい展開して、反例木を生成する
+   Expands expr n-times and generates a counterexample tree
 *)
 let rec expand_tree rules n expr =
   let is_term f =
@@ -40,7 +40,7 @@ let rec expand_tree rules n expr =
 
   if n < - (max 30 !Flag.FairNonTermination.expand_ce_iter_init) then
     (Flag.FairNonTermination.break_expansion_ref := true;
-     Var "end") (* 打ち切れる場所が現れないときの無限ループ防止 *)
+     Var "end") (* Prevention of infinite loop when there is no break point *)
   else match expr with
   | Var s when is_term s ->
      Var s
@@ -51,7 +51,7 @@ let rec expand_tree rules n expr =
      Abst (x, e)
   | Apply (e1, e2) ->
      begin match expand_tree rules (n - 1) e1 with
-     | Var s when n < 0 && (String.starts_with s "randint_") -> (* n回展開済みで、乱数生成の直前なら、展開を打ち切る*)
+     | Var s when n < 0 && (String.starts_with s "randint_") -> (* Stop expansion if it already expands n-times and right before random int generation *)
         Var "end"
      | Abst (x, e) ->
         expand_tree rules n (subst x e2 e)
@@ -96,6 +96,6 @@ let rec expansion_loop prog0 labeled is_cp ce_rules prog start_symbol =
 
 let cegar prog0 labeled is_cp ce_rules prog =
   expansion_iter_count_ref := max !Flag.FairNonTermination.expand_ce_iter_init !expansion_iter_count_ref;
-  (* Format.printf "RULES: %a@.@." (List.print pp_rule) ce_rules; *)
+  (* Format.fprintf !Flag.Print.target "RULES: %a@.@." (List.print pp_rule) ce_rules; *)
   let start_symbol = fst @@ List.hd ce_rules in
   expansion_loop prog0 labeled is_cp ce_rules prog start_symbol

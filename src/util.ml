@@ -1,18 +1,30 @@
-exception Fatal of string
 exception Unsupported of string
 exception TimeOut
 exception Killed
+exception Found
 
-let fatal s = raise (Fatal s)
-let unsupported s = raise (Unsupported s)
+(* Exceptions *)
+let failwith fmt = Format.kasprintf failwith fmt
+let invalid_arg fmt = Format.kasprintf invalid_arg fmt
+let unsupported fmt = Format.kasprintf (fun s -> raise (Unsupported s)) fmt
 let timeout () = raise TimeOut
 let killed () = raise Killed
 
-let warning s = Format.eprintf "WARNING: %s@\n%!" s
+let warning_history = ref []
+let warning fmt =
+  let cont s =
+    if not (List.mem s !warning_history) then begin
+      warning_history := s :: !warning_history;
+      Format.eprintf "%s@\n%!" s
+    end
+  in
+  Format.kasprintf cont ("WARNING: "^^fmt)
 
 let (!!) f = f ()
 let (-|) f g x = f (g x)
 let (|-) f g x = g (f x)
+let (|--) f g x y = g (f x y)
+let (--|) f g x y = f (g x y)
 let (|@>) x f = f x; x
 let (|@-) f g x = f x |@> g
 let (|*>) x _f = x
@@ -30,9 +42,12 @@ let (&>) f x = f x
 let (-$-) f x y = f y x
 (* "f -$- x" = "fun y -> f y x" *)
 (* "(-$-) (/) x" = "fun y -> y / x" *)
+let (&&&) f g x = f x && g x
+let (|||) f g x = f x || g x
 let (!?) x = Lazy.force x
-
+let (let@) f k = f k
 let (=>) b1 b2 = not b1 || b2
+let (@@@) = List.rev_append
 
 let raise_assert_failure loc =
   let r = Str.regexp {|^File \"\(.*\)\", line \([0-9]+\), characters \([0-9]+\)-[0-9]+$|} in
@@ -52,28 +67,41 @@ let assert_ ?__LOC__ f x =
       | Some loc -> raise_assert_failure loc
 let assert_false ?__LOC__ _ =
   match __LOC__ with
-  | None -> fatal "assert_false"
+  | None -> failwith "assert_false"
   | Some loc -> raise_assert_failure loc
 
-let (@@@) = List.rev_append
-
-let rec print_list_aux print punc fm xs =
+let rec print_list_aux_with_flag ?(first=true) print punc fm xs =
   match xs with
   | [] -> ()
-  | [x] -> print fm x
+  | [x] -> print ~first ~last:true fm x
   | x::xs ->
-      Format.fprintf fm "@[%a@]" print x;
+      Format.fprintf fm "@[%a@]" (print ~first ~last:false) x;
       Format.fprintf fm punc;
-      Format.fprintf fm "%a" (print_list_aux print punc) xs
+      Format.fprintf fm "%a" (print_list_aux_with_flag print punc ~first:false) xs
 
-let print_list print ?(first=false) ?(last=false) punc fm xs =
+let print_list_aux print punc fm xs =
+  let print ~first ~last fm x = print fm x in
+  print_list_aux_with_flag print punc fm xs
+  [@@ocaml.warning "-27"]
+
+let print_list_with_flag print ?(box=ignore) ?(first=false) ?(last=false) ?limit punc fm xs =
   if xs <> [] then
+    let exceed = match limit with None -> false | Some limit -> limit >= 0 && List.length xs > limit in
+    let xs = if exceed then BatList.take (Option.get limit) xs else xs in
     let punc' = format_of_string punc in
     Format.fprintf fm "@[";
+    box fm;
     if first then Format.fprintf fm punc';
-    Format.fprintf fm "%a" (print_list_aux print punc') xs;
+    Format.fprintf fm "%a" (print_list_aux_with_flag print punc') xs;
+    if exceed && limit > Some 0 then Format.fprintf fm punc';
+    if exceed then Format.fprintf fm "...";
     if last then Format.fprintf fm punc';
     Format.fprintf fm "@]"
+
+let print_list print ?(box=ignore) ?(first=false) ?(last=false) ?limit punc fm xs =
+  let print ~first ~last fm x = print fm x in
+  print_list_with_flag print ~box ~first ~last ?limit punc fm xs
+  [@@ocaml.warning "-27"]
 
 module IntSet =
   Set.Make(
@@ -106,7 +134,7 @@ module Pair = struct
   let of_list xs =
     match xs with
     | [x;y] -> x,y
-    | _ -> invalid_arg "Pair.of_list"
+    | _ -> invalid_arg "%s" __FUNCTION__
   let print f g ppf (x,y) = Format.fprintf ppf "@[(@[%a,@ %a@])@]" f x g y
   let eq eq1 eq2 (x,y) (x',y') = eq1 x x' && eq2 y y'
   let compare cmp1 cmp2 (x,y) (x',y') =
@@ -115,9 +143,11 @@ module Pair = struct
       r
     else
       cmp2 y y'
+  let iter f g (x,y) = f x; g y
 end
 
 module Triple = struct
+  let triple x y z = x, y, z
   let fst (x,_,_) = x
   let snd (_,y,_) = y
   let trd (_,_,z) = z
@@ -131,7 +161,7 @@ module Triple = struct
   let of_list xs =
     match xs with
     | [x;y;z] -> x,y,z
-    | _ -> invalid_arg "Triple.of_list"
+    | _ -> invalid_arg "%s" __FUNCTION__
   let to_pair_r (x,y,z) = x, (y, z)
   let to_pair_l (x,y,z) = (x, y), z
   let of_pair_r (x,(y,z)) = x, y, z
@@ -153,7 +183,7 @@ module Quadruple = struct
   let of_list xs =
     match xs with
     | [x;y;z;w] -> x,y,z,w
-    | _ -> invalid_arg "Quadruple.of_list"
+    | _ -> invalid_arg "%s" __FUNCTION__
   let to_pair_r (x,y,z,w) = x, (y, (z, w))
   let to_pair_m (x,y,z,w) = (x, y), (z, w)
   let to_pair_l (x,y,z,w) = ((x, y), z), w
@@ -189,6 +219,7 @@ module Fun = struct
 end
 
 module Option = struct
+  include Option
   include BatOption
 
   exception No_value
@@ -196,10 +227,17 @@ module Option = struct
   let iter = may
   let apply = map
 
+  let (let*) = bind
+  let (let**) x f =
+    match x with
+    | None -> None
+    | Some y -> try f y with _ -> None
   let (>>=) = bind
+  let (>=>) f g = fun x -> f x >>= g
   let return = some
   let lift = map
   let fmap = map
+  let guard b = if b then Some () else None
 
   let get x =
     match x with
@@ -230,7 +268,8 @@ module Option = struct
     | Some x' -> Format.fprintf fm "Some %a" pr x'
 
   let try_with f h = try Some !!f with e when h e -> None
-  let try_any f = try_with f (Fun.const true)
+  let try_with_any f = try_with f (Fun.const true)
+  let try_with_not_found f x = try Some (f x) with Not_found -> None
 
   let for_all f x =
     match x with
@@ -240,11 +279,18 @@ module Option = struct
     match x with
     | None -> false
     | Some y -> f y
+
+  let merge (++) x y =
+    match x, y with
+    | None, None -> None
+    | Some x, None -> Some x
+    | None, Some y -> Some y
+    | Some x, Some y -> Some (x ++ y)
+  let join = merge
 end
 
 module List = struct
   include BatList
-  module L = Labels
 
   let singleton x = [x]
   let cons x xs = x::xs
@@ -262,9 +308,9 @@ module List = struct
     | [x] -> x
     | _ -> invalid_arg "List.get"
 
-  let is_singleton xs = List.length xs = 1
+  let is_singleton xs = length xs = 1
 
-  let print pr fm xs = Format.fprintf fm "@[<hov 1>[%a]@]" (print_list pr ";@ ") xs
+  let print ?limit pr fm xs = Format.fprintf fm "@[<hov 1>[%a]@]" (print_list ?limit pr ";@ ") xs
 
   let rec unfold_right f s =
     match f s with
@@ -291,9 +337,11 @@ module List = struct
   let rev_map_flatten f xs = fold_left (fun acc x -> f x @@@ acc) [] xs
   let rev_flatten_map = rev_map_flatten
   let flatten_map f xs = rev @@ rev_map_flatten f xs
-  let flatten_mapi f xs = List.flatten @@ List.mapi f xs
+  let flatten_mapi f xs = flatten @@ mapi f xs
   let rev_flatten xs = rev_map_flatten Fun.id xs
   let concat_map = flatten_map
+  let map_append f xs ys = fold_right (fun x acc -> f x :: acc) xs ys
+  let rev_map_append f xs ys = fold_left (fun acc x -> f x :: acc) ys xs
 
   let rec tabulate n f rev_acc =
     if n < 0 then
@@ -358,10 +406,10 @@ module List = struct
         rev_filter_map acc' f xs'
   let rev_filter_map f xs = rev_filter_map [] f xs
   let filter_map2 f xs ys = rev_filter_map Fun.id @@ rev_map2 f xs ys
-  let filter_mapi f xs = filter_map Fun.id @@ List.mapi f xs
+  let filter_mapi f xs = filter_map Fun.id @@ mapi f xs
 
   let filter_out f xs = filter (not -| f) xs
-  let filteri f xs = filter_map Fun.id @@ List.mapi (fun i x -> if f i x then Some x else None) xs
+  let filteri f xs = filter_map Fun.id @@ mapi (fun i x -> if f i x then Some x else None) xs
 
   let rev_split xs = fold_left (fun (acc1,acc2) (x,y) -> x::acc1, y::acc2) ([],[]) xs
   let split_map f = rev_split -| rev_map f
@@ -369,13 +417,22 @@ module List = struct
   let split3 xs = fold_right (fun (x,y,z) (acc1,acc2,acc3) -> x::acc1, y::acc2, z::acc3) xs ([],[],[])
 
   let replace_nth xs i y = mapi (fun j x -> if j = i then y else x) xs
-  let update = replace_nth
   let set = replace_nth
+
+  let add_index xs = mapi Pair.pair xs
 
   let mem ?(eq=(=)) x xs = exists (eq x) xs
   let mem_on ?(eq=(=)) f x xs =
     let x' = f x in
     exists (eq x' -| f) xs
+
+  let rec find_mapi f i = function
+    | [] -> raise Not_found
+    | x::xs' ->
+        match f i x with
+        | None -> find_mapi f (i+1) xs'
+        | Some r -> r
+  let find_mapi f xs = find_mapi f 0 xs
 
   let find_eq_on ?(eq=(=)) f x xs =
     let x' = f x in
@@ -418,8 +475,28 @@ module List = struct
     | None -> raise Not_found
     | Some x -> x
 
+  let find_map_default f x xs =
+    match find_map_opt f xs with
+    | None -> x
+    | Some x -> x
+
   let find_pos f xs =
     fst @@ findi f xs
+
+  let rec find_decomp f xs =
+    match xs with
+    | [] -> raise Not_found
+    | x::xs' ->
+        if f x then
+          x, xs'
+        else
+          let y,xs'' = find_decomp f xs' in
+          y, x::xs''
+
+  let find_decomp_opt f xs =
+    try
+      Some (find_decomp f xs)
+    with Not_found -> None
 
   let assoc_default ?(eq=(=)) x k tbl =
     try
@@ -446,6 +523,8 @@ module List = struct
         if eq k k'
         then x, tbl'
         else decomp_assoc ~eq k tbl' |> Pair.map_snd @@ cons (k', x)
+
+  let subst ?(eq=(=)) map x = assoc_default ~eq x x map
 
   let classify ?(eq=(=)) xs =
     let rec aux rev_acc xs =
@@ -484,7 +563,7 @@ module List = struct
 
   let for_alli f xs = List.for_all (Fun.uncurry f) @@ List.mapi Pair.pair xs
 
-  let eq ?(eq=(=)) xs ys = length xs = length ys && for_all2 eq xs ys
+  let eq ?(eq=(=)) xs ys = compare_lengths xs ys = 0 && for_all2 eq xs ys
 
   let transpose xss =
     match xss with
@@ -499,11 +578,6 @@ module List = struct
       xs
     else
       x::xs
-
-  let rec is_unique ?(eq=(=)) xs =
-    match xs with
-    | [] | [_] -> true
-    | x::xs' -> List.for_all (not -| eq x) xs' && is_unique xs'
 
   let reduce_left = reduce
   let reduce_right f ts =
@@ -531,6 +605,27 @@ module List = struct
     | [_] -> true
     | x::xs' -> List.for_all (not -| eq x) xs' && is_unique ~eq xs'
 
+  let fold_right_map f xs acc =
+    let aux x (acc,xs) =
+      let acc,x' = f x acc in
+      acc, x'::xs
+    in
+    fold_right aux xs (acc,[])
+
+  let rec decomp_common_prefix ?(eq=(=)) xs ys =
+    match xs, ys with
+    | x::xs, y::ys when eq x y ->
+        let prefix,xs',ys' = decomp_common_prefix xs ys in
+        x::prefix, xs', ys'
+    | _ -> [], xs, ys
+
+  (* for OCaml <4.12.0 *)
+  let rec equal eq l1 l2 =
+    match l1, l2 with
+    | [], [] -> true
+    | [], _::_ | _::_, [] -> false
+    | a1::l1, a2::l2 -> eq a1 a2 && equal eq l1 l2
+
   module Set = struct
     let diff ?(eq=(=)) l1 l2 = filter_out (mem ~eq -$- l2) l1
     let inter ?(eq=(=)) l1 l2 = filter (mem ~eq -$- l2) l1
@@ -546,9 +641,63 @@ module List = struct
     let (-) = diff
     let (&&) = inter
   end
+
+  module type EqType = sig
+    type 'a t
+    val eq : 'a t -> 'a t -> bool
+  end
+
+  module Make(X : EqType) = struct
+    let unique xs = unique ~eq:X.eq xs
+    let mem x xs = mem ~eq:X.eq x xs
+    let mem_on f x xs = mem_on ~eq:X.eq f x xs
+    let find_eq_on f x xs = find_eq_on ~eq:X.eq f x xs
+    let assoc x map = assoc ~eq:X.eq x map
+    let mem_assoc x map = mem_assoc ~eq:X.eq x map
+    let assoc_default x y map = assoc_default ~eq:X.eq x y map
+    let assoc_opt x map = assoc_opt ~eq:X.eq x map
+    let assoc_map x f map = assoc_map ~eq:X.eq x f map
+    let decomp_assoc x map = decomp_assoc ~eq:X.eq x map
+    let classify xs = classify ~eq:X.eq xs
+    let is_prefix xs ys = is_prefix ~eq:X.eq xs ys
+    let assoc_all x xs = assoc_all ~eq:X.eq x xs
+    let cons_unique x xs = cons_unique ~eq:X.eq x xs
+    let is_unique xs = is_unique ~eq:X.eq xs
+    let subst map x = subst ~eq:X.eq map x
+    module Set = struct
+      let diff xs ys = Set.diff ~eq:X.eq xs ys
+      let inter xs ys = Set.inter ~eq:X.eq xs ys
+      let subset xs ys = Set.subset ~eq:X.eq xs ys
+      let supset xs ys = Set.supset ~eq:X.eq xs ys
+      let union xs ys = Set.union ~eq:X.eq xs ys
+      let disjoint xs ys = Set.disjoint ~eq:X.eq xs ys
+      let eq xs ys = Set.eq ~eq:X.eq xs ys
+      let (=) = eq
+      let (<=) = subset
+      let (>=) = supset
+      let (+) = union
+      let (-) = diff
+      let (&&) = inter
+    end
+    let eq xs ys = eq ~eq:X.eq xs ys
+  end
+
+  module L = struct
+    let filter_out ~f xs = filter_out f xs
+    let flatten_map = concat_map
+    let fold_right_map ~init ~f xs = fold_right_map f xs init
+    let fold_left_map ~init ~f xs = fold_left_map f init xs
+    let find_map ~f xs = find_map f xs
+    let find_map_opt ~f xs = find_map_opt f xs
+    include Labels
+  end
 end
 
 module Focus = struct
+  let apply fcs_arg f fcs_ret x =
+    let ctx_arg,y = fcs_arg x in
+    let ctx_ret,r = fcs_ret (f y) in
+    ctx_ret (ctx_arg r)
   let id x = Fun.id, x
   let fst (x,y) = (fun z -> z,y), x
   let snd (x,y) = (fun z -> x,z), y
@@ -557,6 +706,48 @@ module Focus = struct
     let ctx2,z = g y in
     ctx2 |- ctx1, z
   let (-|) f g x = (g |- f) x
+end
+
+module Exception = struct
+  let not_raise ?exn f x =
+    try
+      ignore @@ f x; true
+    with e when exn = None || Some e = exn -> false
+  let does_raise ?exn f x = not (not_raise ?exn f x)
+  let finally = BatPervasives.finally
+end
+
+module Ref = struct
+  let map f x =
+    x := f !x
+
+  let set = (:=)
+  let deref = (!)
+
+  let tmp_set x v f =
+    let prev = !x in
+    x := v;
+    Exception.finally (fun () -> x := prev) f ()
+end
+
+module Fmap = struct
+  let const = Fun.const
+  let id = Fun.id
+  let __ = id
+  let option = Option.map
+  let list = List.map
+  let list2 = List.map2
+  let fst = Pair.map_fst
+  let snd = Pair.map_snd
+  let fst3 = Triple.map_fst
+  let snd3 = Triple.map_snd
+  let trd = Triple.map_trd
+  let pair = Pair.map
+  let triple = Triple.map
+  let pair_curry f g x y = f x, g y
+  let ( * ) = pair
+  let string = String.map
+  let if_ = Fun.if_
 end
 
 let topological_sort ?(eq=(=)) edges =
@@ -580,6 +771,10 @@ let topological_sort ?(eq=(=)) edges =
 module Compare = struct
   let on ?(cmp=compare) f x y = cmp (f x) (f y)
   let eq_on ?(eq=(=)) f x y = eq (f x) (f y)
+  let dict cmp1 x1 x2 cmp2 y1 y2 =
+    let r = cmp1 x1 x2 in
+    if r <> 0 then r
+    else cmp2 y1 y2
   let topological ?(eq=(=)) ?dom edges =
     let map =
       let dom' =
@@ -596,19 +791,32 @@ module Compare = struct
     on (List.assoc ~eq -$- map)
 end
 
+module Eq = struct
+  let on = Compare.eq_on
+  let pair = Pair.eq
+  let list eq x y = List.eq ~eq x y
+  let ( * ) = pair
+  let option = Option.eq
+end
+
 module Array = BatArray
 
 module Hashtbl = BatHashtbl
 
 module Map = BatMap
 
-module Char = BatChar
+module Char = struct
+  include BatChar
+end
 
 module String = struct
   include BatString
 
   let tl s =
     sub s 1 (length s - 1)
+
+  let last s =
+    s.[length s-1]
 
   let split_nth s n =
     sub s 0 n, sub s n (length s - n)
@@ -642,6 +850,11 @@ module String = struct
     | '|' -> Some "bar"
     | '~' -> Some "tilde"
     | '\'' -> Some "prime"
+    | '[' -> Some "lbracket"
+    | ']' -> Some "rbracket"
+    | '(' -> Some "lparen"
+    | ')' -> Some "rparen"
+    | ' ' -> Some "space"
     | _ -> None
 
   let is_sign = Option.is_some -| of_sign
@@ -684,6 +897,23 @@ module String = struct
       s'
     else
       s
+
+  let mem c s = index_opt s c <> None
+
+  let remove_prefix_aux ~prefix s =
+    match split s ~by:prefix with
+    | "", s2 -> Some s2
+    | _ -> None
+    | exception Not_found -> None
+  let remove_prefix ~prefix s =
+    match remove_prefix_aux ~prefix s with
+    | None -> invalid_arg "%s" __FUNCTION__
+    | Some r -> r
+  let remove_prefix_if_any ~prefix s =
+    match remove_prefix_aux ~prefix s with
+    | None -> s
+    | Some r -> r
+
 end
 
 module Math = struct
@@ -711,10 +941,16 @@ end
 module Format = struct
   include Format
   let dummy_formatter = make_formatter Fun.ignore3 ignore
+  let iprintf f = ifprintf Format.std_formatter f
 end
 
 module Filename = struct
   include Filename
+
+  let decomp_extension filename =
+    match String.rsplit filename ~by:"." with
+    | exception Not_found -> None
+    | ss -> Some ss
 
   let chop_extension_if_any filename =
     try
@@ -723,14 +959,6 @@ module Filename = struct
 
   let change_extension filename ext =
     chop_extension_if_any filename ^ "." ^ ext
-end
-
-module Exception = struct
-  let not_raise f x =
-    try
-      ignore @@ f x; true
-    with _ -> false
-  let finally = BatPervasives.finally
 end
 
 module IO = struct
@@ -758,40 +986,17 @@ module IO = struct
 end
 
 
-module Ref = struct
-  let map f x =
-    x := f !x
+class counter = object (self)
+  val init = 0
+  val mutable counter = 0
+  val mutable stash = []
 
-  let set = (:=)
-  let deref = (!)
+  method peep = counter
+  method gen = counter <- counter+1; counter
+  method reset = counter <- init
 
-  let tmp_set x v f =
-    let prev = !x in
-    x := v;
-    Exception.finally (fun () -> x := prev) f ()
-end
-
-module Counter : sig
-  type t
-  val create : unit -> t
-  val peep : t -> int
-  val gen : t -> int
-  val reset : t -> unit
-  val stash : t -> unit
-  val pop : t -> unit
-end
-  =
-struct
-  type t = int ref * int list ref
-
-  let init = 0
-  let create () = ref init, ref []
-  let peep ((c,_)) = !c
-  let gen ((c,_)) = incr c; !c
-  let reset ((c,_)) = c := init
-
-  let stash (c,s as cnt) = s := !c::!s; reset cnt
-  let pop (_,s) = s := List.tl !s
+  method stash = stash <- counter::stash; self#reset
+  method pop = stash <- List.tl stash
 end
 
 module Combination = struct
@@ -800,42 +1005,55 @@ module Combination = struct
     | [] -> [[]]
     | xs::xxs' ->
         let cmb = take_each xxs' in
-        List.flatten_map (fun x -> List.map (List.cons x) cmb) xs
+        List.concat_map (fun x -> List.map (List.cons x) cmb) xs
 
   let product xs ys =
     List.flatten_map (fun p -> List.map (fun p' -> p',p) xs) ys
 end
 
+module Nondet = struct
+  let bind xs f = List.concat_map f xs
+  let (>>=) = bind
+  let (let*) = bind
+  let return x = [x]
+end
+
 module Arg = struct
   include Arg
   let align args =
-    let aux i (s,f,desc) =
-      if s = "" then
-        let nr = if i <> 0 then "\n  " else "" in
-        let s' =
-          desc
-          |> String.trim
-          |> Format.sprintf "%s(*** %s ***)" nr
-        in
-        s', f, " "
-      else
-        let aux c =
-          if c = '\n' then
-            let rec len i =
-              if desc.[i] = ' ' then
-                1 + len (i+1)
-              else 3
-            in
-            "\n" ^ String.make (String.length s + len 0) ' '
-          else
-            String.of_char c
-        in
-        s, f, String.replace_chars aux desc
-    in
     args
     |> List.map (fun (s,f,desc) -> if s = "" then s,f," "^desc else s,f,desc)
     |> align
-    |> List.mapi aux
+    |> List.mapi (fun i (s,f,desc) ->
+           if s = "" then
+             let nr = if i <> 0 then "\n  " else "" in
+             let s' =
+               desc
+               |> String.trim
+               |> Format.sprintf "%s(*** %s ***)" nr
+             in
+             s', f, " "
+           else
+             let aux c =
+               if c = '\n' then
+                 let rec len i =
+                   if desc.[i] = ' ' then
+                     1 + len (i+1)
+                   else 3
+                 in
+                 "\n" ^ String.make (String.length s + len 0) ' '
+               else
+                 String.of_char c
+             in
+             s, f, String.replace_chars aux desc)
+end
+
+module Sys = struct
+  include Sys
+  let runtime_parameters_list () =
+    !!runtime_parameters
+    |> String.split_on_char ','
+    |> List.remove_all -$- ""
 end
 
 module Marshal = struct
@@ -852,6 +1070,9 @@ module Marshal = struct
 
   let from_file_exn file =
     IO.CPS.open_in file Marshal.from_channel
+
+  let size ?(flag=[]) x =
+     String.length (to_string x flag)
 end
 
 
@@ -860,14 +1081,14 @@ module Unix = struct
 
   let parallel ?(wait = fun _ -> wait()) limit cmds =
     let rec loop running waiting =
-      let debug = false in
-      if debug then Format.printf "|running|: %d@." (List.length running);
-      if debug then Format.printf "limit: %d@." limit;
-      if debug then Format.printf "|waiting|: %d@.@." (List.length waiting);
+      let fm = if false then Format.std_formatter else Format.dummy_formatter in
+      Format.fprintf fm "|running|: %d@." (List.length running);
+      Format.fprintf fm "limit: %d@." limit;
+      Format.fprintf fm "|waiting|: %d@.@." (List.length waiting);
       if limit = List.length running || waiting = [] then
         let pid,_status = wait running in
         let i = List.assoc pid running in
-        if debug then Format.printf "DONE #%d (pid: %d)@." i pid;
+        Format.fprintf fm "DONE #%d (pid: %d)@." i pid;
         let running' = List.filter_out (fst |- (=) pid) running in
         (if running' <> [] || waiting <> [] then loop running' waiting)
       else
@@ -875,7 +1096,7 @@ module Unix = struct
         | [] -> invalid_arg "Util.Unix.parallel"
         | (i, cmd)::waiting' ->
             let pid = create_process "sh" [|"sh"; "-c"; cmd|] stdin stdout stderr in
-            if debug then Format.printf "Run #%d by process %d@." i pid;
+            Format.fprintf fm "Run #%d by process %d@." i pid;
             let running' = (pid,i)::running in
             loop running' waiting'
     in
@@ -885,10 +1106,9 @@ module Unix = struct
 
   module CPS = struct
     let open_process ?(check=ignore) cmd k =
-      let cin,cout = open_process cmd in
-      let r = k cin cout in
-      let st = close_process (cin, cout) in
-      check st;
+      let ch = open_process cmd in
+      let r = k ch in
+      check (close_process ch);
       r
 
     let open_process_in ?(check=ignore) cmd k =
@@ -948,12 +1168,12 @@ end
 
 
 module CommandLine = struct
-  let confirm ?(default=true) ?(yes=false) s =
+  let confirm ?(fm=Format.std_formatter) ?(default=true) ?(yes=false) s =
     let yn = if default then "[Y/n]" else "[y/N]" in
     let rec aux () =
-      Format.printf "%s %s @?" s yn;
+      Format.fprintf fm "%s %s @?" s yn;
       if yes then
-        (Format.printf "y@?"; true)
+        (Format.fprintf fm "y@?"; true)
       else
         match read_line() with
         | "" -> default
@@ -962,6 +1182,12 @@ module CommandLine = struct
         | _ -> aux ()
     in
     aux ()
+
+  let rec read_int ?(fm=Format.std_formatter) ?(check=fun _ -> true) msg =
+    Format.fprintf fm "%s: @?" msg;
+    match read_int_opt() with
+    | Some n when check n -> n
+    | _ -> read_int ~check msg
 end
 
 module Timer = struct
@@ -982,22 +1208,6 @@ module Cursor = struct
   let up_begin fm n = Format.fprintf fm "\027[%dF" n
   let show fm = Format.fprintf fm "\027[?25h"
   let hide fm = Format.fprintf fm "\027[?25l"
-end
-
-
-module JSON = struct
-  include Yojson.Basic
-
-  let load file of_json =
-    IO.CPS.open_in file @@
-      (IO.input_all
-       |- from_string
-       |- of_json)
-
-  let save ?(pretty=false) file to_json data =
-    let to_s json = if pretty then pretty_to_string json else to_string json in
-    IO.CPS.open_out file @@
-      (output_string -$- (to_s @@ to_json data))
 end
 
 module LazyList = struct
@@ -1021,19 +1231,30 @@ module LazyList = struct
     else
       []
 
+  let rec of_lazy_list l =
+    match l with
+    | [] -> lazy Nil
+    | x::l' -> lazy (Cons(Lazy.force x, of_lazy_list l'))
+
   let concat_map f = concat -| map f
   let flatten_map = concat_map
 end
 
-(* This function uses '\b' *)
-let print_begin_end ?(fm=Format.std_formatter) =
-  let pre fm = Format.fprintf fm "%s" "BEGIN" in
-  let post fm _r = Format.fprintf fm "%s" "END" in
-  fun ?(pre=pre) ?(post=post) f ->
-    Format.fprintf fm "@[<v 2>%t@ " pre;
-    f ()
-    |@> Format.fprintf fm "@]\b\b%a@\n" post
+module Memoize = struct
+  let create_gen size =
+    let tbl = Hashtbl.create size in
+    fun ~found ~key_of x ~result_of f ->
+      let k = key_of x in
+      match Hashtbl.find_option tbl k with
+      | Some x -> found x
+      | None ->
+          f k
+          |@> Hashtbl.add tbl k -| result_of
 
+  let create size =
+    let cache = create_gen size in
+    fun x f -> cache ~found:Fun.id ~key_of:Fun.id x ~result_of:Fun.id f
+end
 
 let rec fixed_point ?(eq=(=)) ?(limit= -1) f init =
   let x = f init in
@@ -1063,3 +1284,100 @@ let transitive_closure ?(eq=(=)) edges =
     List.fold_left aux edges' edges'
   in
   fixed_point ~eq:(List.Set.eq ~eq:eq') f edges
+
+let assign_id_by_eq (type t) ?(eq=(=)) ?(size=0) ?(origin=0) (xs : t list) : int * (t -> int) * (t * int) list =
+  let module H = Hashtbl.Make(struct type nonrec t = t let equal = eq let hash = Hashtbl.hash end) in
+  let tbl = H.create size in
+  let cnt = ref origin in
+  let find_and_assign x =
+    try
+      H.find tbl x
+    with Not_found ->
+      let n = !cnt in
+      incr cnt;
+      H.add tbl x n;
+      n
+  in
+  let map = List.map (Pair.add_right find_and_assign) xs in
+  H.length tbl,
+  H.find tbl,
+  map
+
+(** Index/rank of sorted lists by topological sort
+    where the element of a SCC becomes the same index.
+    For example, the indices for graph [[a,b,c] -> [d] -> [e,f,g] -> [h]] ([[...]] represents a SCC)
+    are [[(b, 0); (c, 0); (a, 0); (d, 1); (e, 2); (f, 2); (g, 2); (h, 3)]]. *)
+let topological_index
+      (scc_of : (int * int) list -> int list list)
+      ?(eq = (=))
+      (edges : ('a * 'a) list)
+    : ('a * int) list =
+  let _,id_of,map = assign_id_by_eq ~eq @@ List.rev_flatten_map Pair.to_list edges in
+  let vertices = List.map snd map |> List.sort_uniq compare in
+  let rev_map : (int * 'a) list  = List.map Pair.swap map in
+  let edges_id : (int * int) list = List.map (Pair.map_same id_of) edges in
+  let scc : int list list = scc_of edges_id in
+  let repr : (int * int list) list = List.mapi Pair.pair scc in
+  let repr_of x = List.find_map (fun (r, xs) -> if List.mem x xs then Some r else None) repr in
+  let edges_repr : (int * int) list =
+    let trans (v1,v2) =
+      let r1 = repr_of v1 in
+      let r2 = repr_of v2 in
+      if r1 = r2 then None else Some (r1, r2)
+    in
+    edges_id
+    |> List.filter_map trans
+    |> List.sort_uniq compare
+  in
+  let sorted = topological_sort edges_repr in
+  let sorted_comp = List.Set.(vertices - sorted) @@@ sorted in
+  let idx_repr : (int * int) list = List.mapi Pair.pair_rev sorted_comp in
+  repr
+  |> List.rev_flatten_map (fun (r,xs) -> List.map (Pair.pair @@ List.assoc r idx_repr) xs)
+  |> List.map (fun (id,x) -> List.assoc x rev_map, id)
+
+module ProgressBar = struct
+  let bars = ["▏";"▎";"▍";"▌";"▋";"▊";"▉";"█"]
+  let bar_num = List.length bars
+
+  (** 0. <= p <= 1. *)
+  let make length p =
+    let n = int_of_float (0.5 +. (float_of_int (length * bar_num)) *. p) in
+    let last = List.last bars in
+    let c1,c2 = n / 8, n mod 8 in
+    let b = c1 = length in
+    let s =
+      String.join "" (List.make c1 last) ^
+      (if b then "" else List.nth bars c2) ^
+      String.make (length - c1 - (if b then 0 else 1)) ' '
+    in
+    n, s
+
+  let print fm length p =
+    let n,s = make length p in
+    Format.fprintf fm "%3d%%|%s|\r@?" (n/bar_num) s
+end
+
+module Print_ = struct
+  let int = Format.pp_print_int
+  let float = Format.pp_print_float
+  let char = Format.pp_print_char
+  let bool = Format.pp_print_bool
+  let string = Format.pp_print_string
+  let option = Option.print
+  let pair = Pair.print
+  let ( * ) = pair
+  let triple = Triple.print
+  let list = List.print
+  let ignore ?(str="_") fm _ = Format.pp_print_string fm str
+  let __ fm x = ignore ~str:"_" fm x
+  let (|>) f pr fm x = pr fm (f x) (* Format.printf "%a" (f |> pr) x = Format.printf "%a" pr (f x) *)
+  let (<|) pr f fm x = pr fm (f x)
+end
+
+let pp_int = Print_.int
+let pp_float = Print_.float
+let pp_char = Print_.char
+let pp_bool = Print_.bool
+let pp_string = Print_.string
+let pp_list = Print_.list

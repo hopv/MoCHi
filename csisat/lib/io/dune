@@ -1,2 +1,0 @@
-(ocamllex (modules csisatDimacsLex csisatFociLex csisatInfixLex))
-(ocamlyacc (modules csisatDimacsParse csisatFociParse csisatInfixParse))

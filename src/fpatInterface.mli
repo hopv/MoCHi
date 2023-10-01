@@ -1,4 +1,4 @@
-(** {6 Translator for CEGAR_syntax} *)
+(** {1 Translator for CEGAR_syntax} *)
 
 val conv_typ : CEGAR_syntax.typ -> Fpat.Type.t
 val conv_const : CEGAR_syntax.const -> Fpat.Const.t
@@ -17,14 +17,14 @@ val inv_fdef : Fpat.Fdef.t -> string * Fpat.Pattern.t list * CEGAR_syntax.t * 'a
 val inv_abst_type : Fpat.AbsType.t -> CEGAR_syntax.typ
 
 
-(** {6 Translator for Syntax} *)
+(** {1 Translator for Syntax} *)
 
 val trans_type : 'a Type.t -> 'a Type.t
 val trans_id : 'a Type.t Id.t -> 'a Type.t Id.t
 val of_term : Syntax.term -> Fpat.Term.t
 
 
-(** {6 SMT solver} *)
+(** {1 SMT solver} *)
 
 val implies :
   ?tenv:Fpat.TypEnv.t -> Fpat.Formula.t list -> Fpat.Formula.t list -> bool
@@ -34,7 +34,7 @@ val is_valid_forall_exists :
   string list -> string list -> CEGAR_syntax.t list -> CEGAR_syntax.t -> bool
 
 
-(** {6 Misc} *)
+(** {1 Misc} *)
 
 val infer :
   (Fpat.HCCSSolver.t -> Fpat.HCCSSolver.t) ->

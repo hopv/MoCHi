@@ -12,32 +12,31 @@ type apt_transition =
   | APT_And of apt_transition list
   | APT_Or of apt_transition list
 
-type spec = (string * int) list * (int * string * apt_transition) list
+type spec_safety = (int * string * int list) list
+type spec_nontermination = (string * int) list * (int * string * apt_transition) list
 
-type counterexample_apt = string Rose_tree.t
 type counterexample = int list
+type counterexample_apt = string Rose_tree.t
 
 type result =
   | Safe of (var * Inter_type.t) list
-  | UnsafeAPT of counterexample_apt
   | Unsafe of counterexample
+  | UnsafeAPT of counterexample_apt
 
 module HS = HorSat_syntax
 
 
-(* returen "" if the version cannot be obtained *)
 let version_aux cmd name =
-  let cin,cout = Unix.open_process (Format.sprintf "%s /dev/null 2> /dev/null" cmd) in
-  let v =
-    try
-      let s = input_line cin in
-      if Str.string_match (Str.regexp (name ^ " \\([.0-9]+\\)")) s 0
-      then Some (String.sub s (Str.group_beginning 1) (Str.group_end 1 - Str.group_beginning 1))
-      else None
-    with Sys_error _ | End_of_file -> None
-  in
-  match Unix.close_process (cin, cout) with
-    Unix.WEXITED(_) | Unix.WSIGNALED(_) | Unix.WSTOPPED(_) -> v
+  match cmd with
+  | None -> None
+  | Some cmd ->
+      let@ cin,_ = Unix.CPS.open_process (Format.sprintf "%s /dev/null 2> /dev/null" cmd) in
+      try
+        let s = input_line cin in
+        if Str.string_match (Str.regexp (name ^ " \\([.0-9]+\\)")) s 0
+        then Some (String.sub s (Str.group_beginning 1) (Str.group_end 1 - Str.group_beginning 1))
+        else None
+      with Sys_error _ | End_of_file -> None
 let version () = version_aux !Flag.ModelCheck.horsat "HorSat"
 
 
@@ -91,8 +90,8 @@ let trans_spec_apt (q,e,qs) =
     | APT_True -> "tt"
     | APT_False -> "ff"
     | APT_State(br, q) -> parens (string_of_int br ^ "," ^ aux q)
-    | APT_And ts -> let s = String.join "/\\" (List.map (apt_transition_to_string false) ts) in if is_top then s else parens s
-    | APT_Or ts -> let s = String.join "\\/" (List.map (apt_transition_to_string false) ts) in if is_top then s else parens s
+    | APT_And ts -> let s = String.join {|/\|} (List.map (apt_transition_to_string false) ts) in if is_top then s else parens s
+    | APT_Or ts -> let s = String.join {|\/|} (List.map (apt_transition_to_string false) ts) in if is_top then s else parens s
   in
     (aux q, e), [apt_transition_to_string true qs]
 
@@ -133,13 +132,13 @@ let get_pair s =
 
 let verifyFile_aux cmd filename =
   let default = "empty" in
-  let result_file = Filename.change_extension !!Flag.Input.main "horsat_out" in
+  let result_file = Filename.change_extension !!Flag.IO.temp "horsat_out" in
   let oc = open_out result_file in
   output_string oc default;
   close_out oc;
   let cmd = Format.sprintf "%s %s > %s" cmd filename result_file in
   let r = Sys.command cmd in
-  if r = 128+9 then killed();
+  if r <> 0 then killed();
   let ic = open_in result_file in
   let lb = Lexing.from_channel ic in
   lb.Lexing.lex_curr_p <-
@@ -163,7 +162,7 @@ let verifyFile cmd parser token filename =
       let line = loc.loc_start.pos_lnum in
       let startchar = loc.loc_start.pos_cnum - loc.loc_start.pos_bol in
       let endchar = loc.loc_end.pos_cnum - loc.loc_start.pos_cnum + startchar in
-      Format.eprintf "File \"%s\", line %d@?" file line;
+      Format.eprintf {|File "%s", line %d@?|} file line;
       if startchar >= 0 then Format.eprintf ", characters %d-%d@." startchar endchar;
       raise Parse_error
   in
@@ -174,19 +173,19 @@ let verifyFile cmd parser token filename =
   | HS.UnsatisfiedAPT ce ->
       (*
       let debug = !Flag.debug_level > 0 in
-      if debug then Format.printf "Unsatisfied non-terminating condition.@. Counter-example:@. %s@." (HS.string_of_result_tree ce);
+      if debug then Format.fprintf !Flag.Print.target "Unsatisfied non-terminating condition.@. Counter-example:@. %s@." (HS.string_of_result_tree ce);
       let cexs, ext_cexs = error_trace ce in
       let ppppp fm (n, l) = Format.fprintf fm "[%d: %a]" n (print_list Format.pp_print_bool ",") l in
-      if debug then List.iter2 (fun c1 c2 -> Format.printf "FOUND:  %a | %a@." (print_list (fun fm n -> Format.fprintf fm (if n=0 then "then" else "else")) ",") c1 (print_list ppppp ",") c2) cexs ext_cexs;
+      if debug then List.iter2 (fun c1 c2 -> Format.fprintf !Flag.Print.target "FOUND:  %a | %a@." (print_list (fun fm n -> Format.fprintf fm (if n=0 then "then" else "else")) ",") c1 (print_list ppppp ",") c2) cexs ext_cexs;
        (*let ext_cexs = List.map (fun _ -> [Fpat.Idnt.V("tmp"), []]) cexs (* TODO: Implement *) in*)
        *)
       UnsafeAPT ce
   | HS.Unsatisfied ce ->
       let ce' =
         let module QC = Flag.Experiment.HORS_quickcheck in
-        match !QC.use with
-        | None -> ce
-        | Some use ->
+        match !QC.use, !QC.command with
+        | None, _ | _, None -> ce
+        | Some use, Some cmd ->
             let option =
               match use with
               | QC.Shortest -> "-shortest"
@@ -194,7 +193,7 @@ let verifyFile cmd parser token filename =
               | QC.LowestCoverage -> "-lowest-coverage"
               | QC.HighestCoverage -> "-highest-coverage"
             in
-            let cmd = Format.sprintf "%s %s %d %s" !QC.command filename !Flag.Experiment.HORS_quickcheck.num option in
+            let cmd = Format.sprintf "%s %s %d %s" cmd filename !Flag.Experiment.HORS_quickcheck.num option in
             let r = Time.measure_and_add Flag.Log.Time.hors_quickcheck (Unix.CPS.open_process_in cmd) IO.input_all in
             let ce =
               r
@@ -219,36 +218,46 @@ let write_log string_of filename target =
 
 
 let check_apt_aux cmd parser token target =
-  let target' = trans_apt target in
-  let ext =
-    if !Flag.ModelCheck.rename_hors then
-      string_of_int !Flag.Log.cegar_loop ^ ".hors"
-    else
-      "hors"
-  in
-  let input = Filename.change_extension !!Flag.Input.main ext in
-  try
-    Debug.printf "%s@." @@ string_of_parseresult_apt target';
-    write_log string_of_parseresult_apt input target';
-    verifyFile cmd parser token input
-  with Failure("lex error") -> raise UnknownOutput
-let check_apt = check_apt_aux !Flag.ModelCheck.horsat HorSat_parser.output_apt HorSat_lexer.token
+  match cmd with
+  | None -> assert false
+  | Some cmd ->
+      let target' = trans_apt target in
+      let ext =
+        if !Flag.ModelCheck.rename_hors then
+          string_of_int !Flag.Log.cegar_loop ^ ".hors"
+        else
+          "hors"
+      in
+      let input = Filename.change_extension !!Flag.IO.temp ext in
+      Debug.printf "%s@." @@ string_of_parseresult_apt target';
+      write_log string_of_parseresult_apt input target';
+      match verifyFile cmd parser token input with
+      | Safe env -> Model_check_common.NTSafe env
+      | UnsafeAPT ce -> NTUnsafe ce
+      | _ -> assert false
+      | exception Failure("lex error") -> raise UnknownOutput
+let check_nontermination = check_apt_aux !Flag.ModelCheck.horsat HorSat_parser.output_apt HorSat_lexer.token
 
 let check_aux cmd parser token target =
-  let target' = trans target in
-  let ext =
-    if !Flag.ModelCheck.rename_hors then
-      string_of_int !Flag.Log.cegar_loop ^ ".hors"
-    else
-      "hors"
-  in
-  let input = Filename.change_extension !!Flag.Input.main ext in
-  try
-    Debug.printf "%s@." @@ string_of_parseresult target';
-    write_log string_of_parseresult input target';
-    verifyFile cmd parser token input
-  with Failure("lex error") -> raise UnknownOutput
-let check = check_aux !Flag.ModelCheck.horsat HorSat_parser.output HorSat_lexer.token
+  match cmd with
+  | None -> assert false
+  | Some cmd ->
+      let target' = trans target in
+      let ext =
+        if !Flag.ModelCheck.rename_hors then
+          string_of_int !Flag.Log.cegar_loop ^ ".hors"
+        else
+          "hors"
+      in
+      let input = Filename.change_extension !!Flag.IO.temp ext in
+      Debug.printf "%s@." @@ string_of_parseresult target';
+      write_log string_of_parseresult input target';
+      match verifyFile cmd parser token input with
+      | Safe env -> Model_check_common.SSafe env
+      | Unsafe ce -> SUnsafe ce
+      | _ -> assert false
+      | exception Failure("lex error") -> raise UnknownOutput
+let check_safety = check_aux !Flag.ModelCheck.horsat HorSat_parser.output HorSat_lexer.token
 
 
 let rec make_label_spec = function
@@ -273,7 +282,12 @@ let make_arity_map labels =
   let funs_map = List.map (fun l -> (l, 1)) labels in
   init @ funs_map
 
-let make_spec_nonterm labels =
+let make_spec_nontermination labels =
   make_arity_map labels, make_apt_spec labels
 
-let make_spec = TrecsInterface.make_spec
+let make_spec_safety = TrecsInterface.make_spec_safety
+
+let is_safe_result = function
+  | Safe _ -> true
+  | Unsafe _ -> false
+  | UnsafeAPT _ -> false

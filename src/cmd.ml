@@ -1,62 +1,72 @@
 open Util
 open Mochi_util
 
-let print_env cmd json =
+let print_env ~cmd ~json =
   let mochi = Revision.mochi in
-  let z3_lib =
-    let a,b,c,d = Z3native.get_version () in
-    Format.sprintf "%d.%d.%d.%d" a b c d
-  in
-  let z3_bin = if Mconfig.z3_available then Some (String.trim @@ Unix.CPS.open_process_in (Mconfig.z3 ^ " -version") IO.input_all) else None in
+  let z3_lib = Z3.Version.full_version in
+  let z3_bin = Option.map (fun z3 -> String.trim @@ Unix.CPS.open_process_in (z3 ^ " -version") IO.input_all) Mconfig.z3 in
   let trecs = TrecsInterface.version () in
   let horsat = HorSatInterface.version () in
   let horsat2 = HorSat2Interface.version () in
   let horsatp = HorSatPInterface.version () in
-  let hoice = if Mconfig.hoice_available then Some (List.nth (String.split_blanc @@ Unix.CPS.open_process_in (Mconfig.hoice ^ " -V") IO.input_all) 1) else None in
+  let hoice = Option.map (fun hoice -> List.nth (String.split_blanc @@ Unix.CPS.open_process_in (hoice ^ " -V") IO.input_all) 1) Mconfig.hoice in
+  let pr fm = Format.fprintf !Flag.Print.target fm in
   if json then
-    try
-      Option.iter (Format.printf "{Build:%S," -| fst) mochi;
-      Format.printf "\"Z3 library\":%S," z3_lib;
-      Option.iter (Format.printf "\"Z3 binary\":%S,") z3_bin;
-      Option.iter (Format.printf "TRecS:%S,") trecs;
-      Option.iter (Format.printf "HorSat:%S,") horsat;
-      Option.iter (Format.printf "HorSat2:%S,") horsat2;
-      Option.iter (Format.printf "HorSatP:%S,") horsatp;
-      Option.iter (Format.printf "HoIce:%S,") hoice;
-      Format.printf "OCaml:%S}" Sys.ocaml_version;
-    with Option.No_value -> exit 1
+    let of_option s x = Option.fold ~none:[] ~some:(fun ver -> [s, `String ver]) x in
+    let assoc =
+      of_option "Build" mochi @
+      ["Z3 library", `String z3_lib] @
+      of_option "Z3 binary" z3_bin @
+      of_option "TRecS" trecs @
+      of_option "HorSat" horsat @
+      of_option "HorSat2" horsat2 @
+      of_option "HorSatP" horsatp @
+      of_option "HoIce" hoice @
+      ["OCaml", `String Sys.ocaml_version]
+    in
+    `Assoc assoc
+    |> JSON.to_string
+    |> pr "%s"
   else
     begin
-      Color.printf Color.Green "MoCHi: Model Checker for Higher-Order Problems@.";
-      Option.iter (fun (r,t) -> Format.printf "  Build: %s (%s)@." r t) mochi;
-      Format.printf "  Z3 library version: %s@." z3_lib;
-      Option.iter (Format.printf "  Z3 binary: %s@.") z3_bin;
-      Option.iter (Format.printf "  TRecS version: %s@.") trecs;
-      Option.iter (Format.printf "  HorSat version: %s@.") horsat;
-      Option.iter (Format.printf "  HorSat2 version: %s@.") horsat2;
-      Option.iter (Format.printf "  HorSatP version: %s@.") horsatp;
-      Option.iter (Format.printf "  HoIce version: %s@.") hoice;
-      Format.printf "  OCaml version: %s@." Sys.ocaml_version;
+      Color.fprintf !Flag.Print.target Green "MoCHi: Model Checker for Higher-Order Programs@.";
+      Option.iter (pr "  Build: %s@.") mochi;
+      pr "  Z3 library version: %s@." z3_lib;
+      Option.iter (pr "  Z3 binary: %s@.") z3_bin;
+      Option.iter (pr "  TRecS version: %s@.") trecs;
+      Option.iter (pr "  HorSat version: %s@.") horsat;
+      Option.iter (pr "  HorSat2 version: %s@.") horsat2;
+      Option.iter (pr "  HorSatP version: %s@.") horsatp;
+      Option.iter (pr "  HoIce version: %s@.") hoice;
+      pr "  OCaml version: %s@." Sys.ocaml_version;
       if cmd then
         !Flag.Log.args
         |> List.map (fun s -> if String.contains s ' ' then Format.sprintf "'%s'" s else s)
-        |> Format.printf "  Command: %a@.@." (print_list Format.pp_print_string " ")
+        |> String.join " "
+        |> pr "  Command: %s@.@."
     end
 
 let just_run_other_command cmd =
-  if !Flag.Input.filenames = [] then
-    (Format.eprintf "Option \"-just-run\" must follow input file@."; exit 1);
-  let filename = List.hd !Flag.Input.filenames in
+  if !Flag.IO.filenames = [] then
+    (Format.eprintf {|Option "-just-run" must follow input file@.|}; exit 1);
+  let filename = List.hd !Flag.IO.filenames in
   let total,r = Time.measure (fun () -> Sys.command @@ snd @@ String.replace ~str:cmd ~sub:"%i" ~by:filename) in
   let result = if r = 0 then "Safe" else "Error" in
-  Format.printf "{filename:%S, result:%S, total:%f}@." filename result total;
+  `Assoc ["filename", `String filename; "result", `String result; "total", `Float total]
+  |> JSON.to_string
+  |> Format.fprintf !Flag.Print.target "%s@.";
   exit r
 
 let align_spec specs =
-  let add_desc (desc,spec) = ("", Arg.Unit ignore, desc)::spec in
   specs
-  |> List.flatten_map add_desc
+  |> List.flatten_map (fun (desc,spec) -> ("", Arg.Unit ignore, desc)::spec)
   |> Arg.align
+
+let set_bin name r =
+  let default = Option.map_default (Format.sprintf {| (default: "%s"|}) "" !r in
+  Format.sprintf "-%s-bin" name,
+  Arg.String (fun s -> r := Some s),
+  Format.sprintf {|<cmd>  Change %s command to <cmd>%s|} name default
 
 let rec spec_general =
   "General options",
@@ -65,11 +75,15 @@ let rec spec_general =
    "-margin", Arg.Int Format.set_margin, "<n>  Set pretty printing margin";
    "-only-result", Arg.Unit set_only_result, " Show only result";
    "-color", Arg.Set Flag.PrettyPrinter.color, " Turn on syntax highlighting";
+   "-no-color", Arg.Clear Flag.PrettyPrinter.color, " Turn off syntax highlighting";
    "-color-always", Arg.Set Flag.PrettyPrinter.color_always, " Turn on syntax highlighting even if stdout does not refer to a terminal";
-   "-ignore-conf", Arg.Set Flag.Mode.ignore_conf, " Ignore option.conf";
-   "-v", Arg.Unit (fun () -> print_env false false; exit 0), " Print the version shortly";
-   "-env", Arg.Unit (fun () -> print_env false true; exit 0), " Print the version and the environment as JSON";
-   "-version", Arg.Unit (fun () -> print_env false false; exit 0), " Print the version";
+   "-ignore-conf", Arg.Unit Flag.IO.(fun () -> if !conf_file = conf_file_default then conf_file := ""), " Ignore option.conf";
+   "-ignore-inc", Arg.Set Flag.IO.ignore_inc, " Ignore *.inc";
+   "-ignore-inc", Arg.Set Flag.IO.ignore_lib, " Ignore *.lib";
+   "-config", Arg.Set_string Flag.IO.conf_file, "<filename>  Use <filename> as config file";
+   "-v", Arg.Unit (fun () -> print_env ~cmd:false ~json:false; exit 0), " Print the versions";
+   "-env", Arg.Unit (fun () -> print_env ~cmd:false ~json:true; exit 0), " Print the version and the environment as JSON";
+   "-version", Arg.Unit (fun () -> print_env ~cmd:false ~json:false; exit 0), " Same as -v";
    "-limit", Arg.Set_int Flag.Limit.time, " Set time limit (seconds)";
    "-limit-sub", Arg.Set_int Flag.Limit.time_subproblem, " Set time limit for each sub-problem (seconds)";
    "-limit-par", Arg.Set_int Flag.Parallel.time, " Set time limit for parallel execution (seconds)";
@@ -83,51 +97,67 @@ let rec spec_general =
                                set_only_result ()),
      Format.asprintf "<dest>  Translate the input to <dest> which must be one of the following:\n%s"
        !!Flag.Trans.string_of_destinations;
+   "-chc", Arg.Set Flag.Method.chc, " CHC solving mode";
    "-p", Arg.Set_int Flag.Parallel.num, "<n>  Numbers of jobs to run simultaneously";
-   "-s", Arg.Unit set_silent, " Do not print any information"]
+   "-s", Arg.Unit set_silent, " Do not print information to stdout except in some printing options "]
 
 and spec_debug =
   "Debug options",
   ["-debug", Arg.String Flag.Debug.set_debug_modules, "<modules>  Set debug flag of modules (comma-separated)";
-   "-stop-after", Arg.Set_string Flag.Debug.stop_after, "<label>"]
+   "-stop-after", Arg.Set_string Flag.Preprocess.stop_after, "<label>";
+   "-check-after", Arg.String Flag.Preprocess.(fun s -> check_flag := false; check_after := s), "<label>";
+   "-input-cex", Arg.Set Flag.Debug.input_cex, " Input counterexamples by hands";
+   "-minimize", Arg.Set Flag.Debug.minimize, "<error>  Minimize erroneous input"]
 
 and spec_experiment =
+  let module Q = Flag.Experiment.HORS_quickcheck in
   "Options for experiments",
   ["-just-run", Arg.String just_run_other_command, " (just for experiments, %i is replaced with the filename)";
-   "-hors-quickcheck-short", Arg.Unit Flag.Experiment.HORS_quickcheck.(fun () -> use := Some Shortest), " Use shortest counterexample generated by hors_quickcheck";
-   "-hors-quickcheck-long", Arg.Unit Flag.Experiment.HORS_quickcheck.(fun () -> use := Some Longest), " Use longest counterexample generated by hors_quickcheck";
-   "-hors-quickcheck-low", Arg.Unit Flag.Experiment.HORS_quickcheck.(fun () -> use := Some LowestCoverage), " Use lowest coverage counterexample generated by hors_quickcheck";
-   "-hors-quickcheck-high", Arg.Unit Flag.Experiment.HORS_quickcheck.(fun () -> use := Some HighestCoverage), " Use highest coverage counterexample generated by hors_quickcheck";
+   "-hors-quickcheck-short", Arg.Unit Q.(fun () -> use := Some Shortest), " Use shortest counterexample generated by hors_quickcheck";
+   "-hors-quickcheck-long", Arg.Unit Q.(fun () -> use := Some Longest), " Use longest counterexample generated by hors_quickcheck";
+   "-hors-quickcheck-low", Arg.Unit Q.(fun () -> use := Some LowestCoverage), " Use lowest coverage counterexample generated by hors_quickcheck";
+   "-hors-quickcheck-high", Arg.Unit Q.(fun () -> use := Some HighestCoverage), " Use highest coverage counterexample generated by hors_quickcheck";
    "-spawn", Arg.Set Flag.Experiment.spawn, " Spawn new process for each sub-problems"]
 
 and spec_abstraction =
+  let module A = Flag.Abstract in
   "Options for abstraction",
-  ["-ignore-exn-arg", Arg.Unit Flag.(fun () -> Abstract.ignore_exn_arg := true), " Ignore exception arguments";
-   "-ignore-data-arg", Arg.Unit Flag.(fun () -> Abstract.ignore_data_arg := true), " Ignore constructor arguments";
-   "-abst-literal", Arg.Int Flag.(fun n -> Abstract.literal := n), " Abstract literals";
-   "-abst-list-eq", Arg.Set Flag.Abstract.list_eq, " Abstract list equalities";
-   "-no-abst-list-eq", Arg.Clear Flag.Abstract.list_eq, " Do not abstract list equalities";
-   "-ignore-non-termination", Arg.Unit Flag.(fun () -> Method.ignore_non_termination := true), " Ignore non-termination";
-   "-abst-exn", Arg.Set Flag.Abstract.exn_to_bool, " Abstract exceptions";]
+  ["-ignore-exn-arg", Arg.Set A.ignore_exn_arg, " Ignore exception arguments";
+   "-ignore-data-arg", Arg.Set A.ignore_data_arg, " Ignore constructor arguments";
+   "-abst-literal", Arg.Set_int A.literal, " Abstract literals";
+   "-abst-list-eq", Arg.Set A.list_eq, " Abstract list equalities";
+   "-no-abst-list-eq", Arg.Clear A.list_eq, " Do not abstract list equalities";
+   "-ignore-non-termination", Arg.Set Flag.Method.ignore_non_termination, " Ignore non-termination";
+   "-abst-exn", Arg.Set A.exn_to_bool, " Abstract exceptions to Booleans"]
 
 and spec_completion =
   "Options for completion",
   ["-option-list", Arg.Unit print_option_and_exit, " Print list of options";
-   "-debug-list", Arg.Unit (fun () -> List.iter (Format.printf "%s@.") !Flag.Debug.debuggable_modules; exit 0), " Print list of debug options";
-   "-trans-list", Arg.Unit (fun () -> List.iter (Format.printf "%s@.") @@ List.map fst Flag.Trans.destinations; exit 0), " Print list of -trans destinations"]
+   "-debug-list", Arg.Unit (fun () -> List.iter (Format.fprintf !Flag.Print.target "%s@.") !Flag.Debug.debuggable_modules; exit 0), " Print list of debug options";
+   "-prep-list",
+     Arg.Unit (fun () ->
+         let pr_prep (_,(descr,_)) = Format.fprintf !Flag.Print.target "%s@." descr in
+         List.iter pr_prep !!Preprocess.all;
+         exit 0),
+     " Print list of preprocess";
+   "-trans-list", Arg.Unit (fun () -> List.iter (Format.fprintf !Flag.Print.target "%s@.") @@ List.map fst Flag.Trans.destinations; exit 0), " Print list of -trans destinations"]
 
 and spec_printing =
+  let module P = Flag.Print in
   "Options for printing",
-  ["-print-abst-types", Arg.Set Flag.Print.abst_typ, " Print abstraction types when the program is safe";
-   "-print-non-CPS-abst", Arg.Unit Flag.(fun () -> Mode.just_print_non_CPS_abst := true; Flag.Mode.trans_to_CPS := false), " Print non-CPS abstracted program (and exit)";
+  ["-o", Arg.String set_print_target, "<logfile>  Log all messages to logfile";
+   "-print-abst-types", Arg.Set P.abst_typ, " Print abstraction types when the program is safe";
    "-print-as-ocaml", Arg.Unit Print.set_as_ocaml, " Print terms in OCaml syntax";
-   "-print-progress", Arg.Set Flag.Print.progress, " Print progress (use after -modular/-imodular)";
+   "-print-progress", Arg.Set P.progress, " Print progress (use after -modular/-imodular)";
    "-print-unused-arg", Arg.Unit Print.set_unused, " Print unused arguments";
-   "-print-cert", Arg.Set Flag.Print.certificate, " Print certificates even if the model checker does not support certificates (need TRecS)";
-   "-print-depth", Arg.Int Print.set_depth, " Print depth of terms";
-   "-print-assert-location", Arg.Unit Flag.Print.(fun () -> assert_loc := true; exit_after_parsing := true), " Print the locations of assertions (used for -target)";
-   "-print-id-location", Arg.String Flag.Print.(fun s -> id_loc := s; exit_after_parsing := true), " Print the locations of variables (used for \"external\" in spec)";
-   "-print-tdata", Arg.Set Flag.Print.tdata, " Print \"TData\" for type symbols"]
+   "-print-cert", Arg.Set P.certificate, " Print certificates even if the model checker does not support certificates (need TRecS)";
+   "-print-depth", Arg.Int Print.set_depth, "<n>  Limit the printing of terms/types to a maximal depth of n";
+   "-print-length", Arg.Int Print.set_length, "<n>  Limit the printing of sequence of term/types to a maximal length of n";
+   "-print-assert-location", Arg.Unit (fun () -> P.assert_loc := true; P.exit_after_parsing := true), " Print the locations of assertions (used for -target)";
+   "-print-id-location", Arg.String (fun s -> P.id_loc := s; P.exit_after_parsing := true), {|<var>  Print the locations of <var> (used for "external" in spec)|};
+   "-print-signature", Arg.Set P.signature, " Print module signatures";
+   "-print-variable-id", Arg.Set P.var_id, " Print varible ids always";
+   "-print-exception", Arg.Unit (fun () -> P.exn := true; P.exit_after_parsing := true), " (for experiments)"]
 
 and spec_preprocessing =
   "Options for preprocessing",
@@ -136,7 +166,7 @@ and spec_preprocessing =
    "-no-exparam", Arg.Set Flag.Method.no_exparam, " Do not add extra parameters";
    "-use-exparam", Arg.Clear Flag.Method.no_exparam, " Add extra parameters when CEGAR fails";
    "-list-option", Arg.Set Flag.Encode.encode_list_opt, " Encode list using options not pairs";
-   "-disable-preprocess", Arg.Clear Flag.Mode.init_trans, " Disable encoding of recursive data structures, CPS transformation, etc.";
+   "-disable-preprocess", Arg.Clear Flag.Method.init_trans, " Disable encoding of recursive data structures, CPS transformation, etc.";
    "-lift-fv", Arg.Set Flag.Method.lift_fv_only, " Lift variables which occur in a body";
    "-cps-naive", Arg.Set Flag.Method.cps_simpl, " Use naive CPS transformation";
    "-ins-param-funarg", Arg.Set Flag.Method.insert_param_funarg, " Insert an extra param for functions with function arguments";
@@ -149,10 +179,13 @@ and spec_preprocessing =
    "-bool-to-int", Arg.Set Flag.Encode.bool_to_int, " Encode booleans into integers";
    "-exn-to-bool", Arg.Set Flag.Abstract.exn_to_bool, " Replace exceptions with int";
    "-encode-before-make-ext-fun", Arg.Set Flag.Method.encode_before_make_ext_fun, " Encode before make external functions";
-   "-make-ext-fun-before-encode", Arg.Clear Flag.Method.encode_before_make_ext_fun, " Make external functions before encode";
+   "-make-ext-fun-before-encode", Arg.Clear Flag.Method.encode_before_make_ext_fun, " Make external functions before encode (BUGGY)";
    "-no-slice", Arg.Clear Flag.Method.slice, " Do not slice";
    "-slice-exp", Arg.Set_int Flag.Method.slice_i, " (just for debug)";
    "-slice-target", Arg.Set_string Flag.Method.slice_target, " (just for debug)";
+   "-reduce-memory", Arg.Set Flag.Preprocess.reduce_memory, " Reduce memory usage in preprocess. This disables some features.";
+   "-save-preprocess", Arg.Set Flag.Preprocess.save_preprocess, " Save each step of preprocess to restart (DOES NOT WORK)";
+   "-restart", Arg.Set Flag.Preprocess.restart_preprocess, " Restart from preprocess (DOES NOT WORK)";
    "-recdata",
      Arg.Int (fun n ->
          let open Flag.Encode.RecData in
@@ -190,12 +223,14 @@ and spec_verification =
                     Method.modular := true;
                     Print.modular_progress := !Flag.Print.progress;
                     Print.progress := false;
-                    Modular.infer_ind := true),
+                    Modular.infer_ind := true;
+                    PredAbst.shift_pred := false),
      " Modular verification (inductive mode)";
    "-verify-ref-typ", Arg.Unit (fun () -> Flag.(mode := Verify_ref_typ)), " Verify whether functions have given refinement types";
-   "-spec", Arg.Set_string Flag.Input.spec, "<filename>  use <filename> as a specification";
+   "-spec", Arg.Set_string Flag.IO.spec, "<filename>  use <filename> as a specification";
    "-use-spec", Arg.Set Flag.Method.use_spec, " use XYZ.spec for verifying XYZ.ml if exists\n(This option is ignored if -spec is used)";
    "-disable-comment-spec", Arg.Clear Flag.Method.comment_spec, " disable {SPEC} on comments";
+   "-ignore-comment-spec", Arg.Clear Flag.Method.comment_spec, " same as -disable-comment-spec";
    "-module-verification", Arg.Unit (fun () -> Flag.(mode := Verify_module)), " Check input as library";
    "-quickcheck", Arg.Unit (fun () -> Flag.(mode := Quick_check)), " Disprove safety via QuickCheck (other method options will be ignored)";
    "-only-specified", Arg.Set Flag.Method.only_specified, " Verify only specified targets";
@@ -225,63 +260,58 @@ and spec_relative_complete =
   ["-relative-complete", Arg.Set Flag.Method.relative_complete, " Enable relatively complete verification from the begining"]
 
 and spec_predicate_abstraction =
+  let module P = Flag.PredAbst in
   "Options for predicate abstraction",
-  ["-abs-remove-false", Arg.Set Flag.PredAbst.remove_false, " Do not use unsatisfiable predicates in abstraction";
-   "-no-enr", Arg.Unit Flag.PredAbst.(fun () -> expand_non_rec := false; expand_non_rec_init := false), " Do not expand non-recursive functions";
-   "-enr", Arg.Unit Flag.PredAbst.(fun () -> expand_non_rec := true; expand_non_rec_init := false),
+  ["-abs-remove-false", Arg.Set P.remove_false, " Do not use unsatisfiable predicates in abstraction";
+   "-no-enr", Arg.Unit P.(fun () -> expand_non_rec := false; expand_non_rec_init := false), " Do not expand non-recursive functions";
+   "-enr", Arg.Unit P.(fun () -> expand_non_rec := true; expand_non_rec_init := false),
            " Expand non-recursive functions except those in the original program";
-   "-abs-filter", Arg.Set Flag.PredAbst.use_filter, " Turn on the abstraction-filter option";
-   "-neg-pred-off", Arg.Set Flag.PredAbst.never_use_neg_pred, " Never use negative predicates for abstraction";
-   "-decomp-pred", Arg.Set Flag.PredAbst.decomp_pred, " Decompose abstraction predicates (e.g., [P1 && P2] ==> [P1, P2])";
-   "-decomp-eq-pred", Arg.Set Flag.PredAbst.decomp_eq_pred, " Decompose abstraction predicates on equalities (e.g., [t1 = t2] ==> [t1 <= t2, t1 >= t2])";
-   "-no-shift-pred", Arg.Clear Flag.PredAbst.shift_pred, " Set predicates true for safe function arguments";
-   "-shift-pred", Arg.Set Flag.PredAbst.shift_pred, " Set predicates true for safe function arguments";
-   "-non-cartesian", Arg.Clear Flag.PredAbst.cartesian, " Do non-cartesian abstraction"]
+   "-abs-filter", Arg.Set P.use_filter, " Turn on the abstraction-filter option";
+   "-neg-pred-off", Arg.Set P.never_use_neg_pred, " Never use negative predicates for abstraction";
+   "-decomp-pred", Arg.Set P.decomp_pred, " Decompose abstraction predicates (e.g., [P1 && P2] ==> [P1, P2])";
+   "-decomp-eq-pred", Arg.Set P.decomp_eq_pred, " Decompose abstraction predicates on equalities (e.g., [t1 = t2] ==> [t1 <= t2, t1 >= t2])";
+   "-no-shift-pred", Arg.Clear P.shift_pred, " Disable -shift-pred";
+   "-shift-pred", Arg.Set P.shift_pred, " Set predicates true for safe function arguments";
+   "-non-cartesian", Arg.Clear P.cartesian, " Do non-cartesian abstraction"]
 
 and spec_homc =
+  let module M = Flag.ModelCheck in
   "Options for model checking",
-  ["-rename-hors", Arg.Set Flag.ModelCheck.rename_hors, " Set different name to each hors file";
+  ["-rename-hors", Arg.Set M.rename_hors, " Set different name to each hors file";
    "-ea", Arg.Set Flag.Print.eval_abst, " Print evaluation of abstacted program";
-   "-bool-church", Arg.Set Flag.ModelCheck.church_encode, " Use church-encoding for model checking";
-   "-trecs", Arg.Unit Flag.(fun () -> ModelCheck.(mc := TRecS)), " Use TRecS as the model checker";
-   "-horsat", Arg.Unit Flag.(fun () -> ModelCheck.(mc := HorSat)), " Use HorSat as the model checker";
-   "-horsat2", Arg.Unit Flag.(fun () -> ModelCheck.(mc := HorSat2)), " Use HorSat2 as the model checker";
-   "-trecs-bin", Arg.Set_string Flag.ModelCheck.trecs,
-                 Format.sprintf "<cmd>  Change trecs command to <cmd> (default: \"%s\")" !Flag.ModelCheck.trecs;
-   "-horsat-bin", Arg.Set_string Flag.ModelCheck.horsat,
-                  Format.sprintf "<cmd>  Change horsat command to <cmd> (default: \"%s\")" !Flag.ModelCheck.horsat;
-   "-horsat2-bin", Arg.Set_string Flag.ModelCheck.horsat2,
-                  Format.sprintf "<cmd>  Change horsat2 command to <cmd> (default: \"%s\")" !Flag.ModelCheck.horsat2;
-   "-horsatp-bin", Arg.Set_string Flag.ModelCheck.horsatp,
-                   Format.sprintf "<cmd>  Change horsatp command to <cmd> (default: \"%s\")" !Flag.ModelCheck.horsatp]
+   "-bool-church", Arg.Set M.church_encode, " Use church-encoding for model checking";
+   "-trecs", Arg.Unit (fun () -> Model_check.use TRecS), " Use TRecS as the model checker";
+   "-horsat", Arg.Unit (fun () -> Model_check.use HorSat), " Use HorSat as the model checker";
+   "-horsat2", Arg.Unit (fun () -> Model_check.use HorSat2), " Use HorSat2 as the model checker";
+   set_bin "trecs" M.trecs;
+   set_bin "horast" M.horsat;
+   set_bin "horsat2" M.horsat2;
+   set_bin "horsatp" M.horsatp]
 
 and spec_predicate_discovery =
+  let module R = Flag.Refine in
   "Options for predicate discovery",
   ["-fpat", Arg.String FpatInterface.parse_arg, "<option>  Pass <option> to FPAT";
    "-bool-init-empty", Arg.Set Flag.PredAbst.bool_init_empty,
      " Use an empty set as the initial sets of predicates for booleans";
    "-bool-init-self", Arg.Clear Flag.PredAbst.bool_init_empty,
      " Use predicates of themselves as the initial sets of predicates for booleans";
-   "-mp", Arg.Set Flag.Refine.use_multiple_paths, " Use multiple infeasible error paths for predicate discovery";
+   "-mp", Arg.Set R.use_multiple_paths, " Use multiple infeasible error paths for predicate discovery";
    "-no-simplification", Arg.Set Flag.PredAbst.no_simplification, " Do not simplify abstracted programs";
-   "-no-rec-chc", Arg.Clear Flag.Refine.use_rec_chc_solver, " Do not use recursive CHC solver";
-   "-rec-chc", Arg.Set Flag.Refine.use_rec_chc_solver, " Use recursive CHC solver";
-   "-rec-chc-limit", Arg.Set_int Flag.Refine.solver_timelimit, " Set time limit for recursive CHC solver (seconds)";
+   "-no-rec-chc", Arg.Clear R.use_rec_chc_solver, " Do not use recursive CHC solver";
+   "-rec-chc", Arg.Set R.use_rec_chc_solver, " Use recursive CHC solver";
+   "-rec-chc-limit", Arg.Set_int R.solver_timelimit, " Set time limit for recursive CHC solver (seconds)";
    "-rec-chc-app-id", Arg.Set Flag.Method.occurence_param, " Add extra parameter for application ID";
-   "-hoice", Arg.Unit Flag.(fun () -> Refine.(solver := Hoice)), " Use HoICE as the recursive horn-clause solver";
-   "-hoice-bin", Arg.Set_string Flag.Refine.hoice,
-                 Format.sprintf "<cmd>  Change hoice command to <cmd> (default: \"%s\")" !Flag.Refine.hoice;
-   "-z3", Arg.Unit Flag.(fun () -> Refine.(solver := Z3)), " Use Z3 as the recursive horn-clause solver";
-   "-z3-bin", Arg.Set_string Flag.Refine.z3,
-              Format.sprintf "<cmd>  Change z3 command to <cmd> (default: \"%s\")" !Flag.Refine.z3;
-   "-z3-spacer", Arg.Unit Flag.(fun () -> Refine.(solver := Z3_spacer)), " Use Z3 (Spacer) as the recursive horn-clause solver";
-   "-z3-spacer-bin", Arg.Set_string Flag.Refine.z3_spacer,
-                 Format.sprintf "<cmd>  Change z3-spacer command to <cmd> (default: \"%s\")" !Flag.Refine.z3_spacer]
+   "-hoice", Arg.Unit R.(fun () -> solver := Hoice), " Use HoICE as the recursive horn-clause solver";
+   set_bin "hoice" R.hoice;
+   "-z3", Arg.Unit (fun () -> R.(solver := Z3)), " Use Z3 as the recursive horn-clause solver";
+   set_bin "z3" R.z3;
+   "-z3-spacer", Arg.Unit R.(fun () -> solver := Z3_spacer), " Use Z3 (Spacer) as the recursive horn-clause solver";
+   set_bin "z3" R.z3_spacer]
 
 and spec_smt =
   "Options for SMT solver",
-  ["-cvc3-bin", Arg.Set_string Flag.External.cvc3,
-                Format.sprintf "<cmd>  Change cvc3 command to <cmd> (default: \"%s\")" !Flag.External.cvc3]
+  [set_bin "cvc3" Flag.External.cvc3]
 
 and spec_fair_termination =
   "Options for fair termination mode",
@@ -289,11 +319,12 @@ and spec_fair_termination =
    "-expand-set-flag", Arg.Set Flag.FairTermination.expand_set_flag, ""]
 
 and spec_termination =
+  let module T = Flag.Termination in
   "Options for termination mode",
   ["-termination-disj",
      Arg.Unit Flag.(fun _ ->
                     mode := Termination;
-                    Termination.disjunctive := true),
+                    T.disjunctive := true),
      " Check termination by finding disjunctive well-founded relation";
    "-termination",
      Arg.Unit Flag.(fun _ -> mode := Termination),
@@ -301,48 +332,47 @@ and spec_termination =
    "-termination-sep",
      Arg.Unit Flag.(fun _ ->
                     mode := Termination;
-                    Termination.separate_pred := true),
+                    T.separate_pred := true),
      " Check termination with separating {decrease, boundedness} verification";
    "-termination-split-callsite",
      Arg.Unit Flag.(fun _ ->
                     mode := Termination;
-                    Termination.split_callsite := true),
+                    T.split_callsite := true),
      " Check termination for each callsite of functions";
    "-add-cd",
-     Arg.Set Flag.Termination.add_closure_depth,
+     Arg.Set T.add_closure_depth,
      " Insert extra parameters for representing depth of closures";
    "-infer-ranking-exparam",
-     Arg.Set Flag.Termination.add_closure_exparam,
+     Arg.Set T.add_closure_exparam,
      " Infer extra ranking parameters for closures for termination verification";
    "-non-termination",
-     Arg.Unit Flag.(fun _ ->
-                    mode := NonTermination;
-                    ModelCheck.church_encode := true;
-                    ModelCheck.mc := ModelCheck.HorSat),
+     Arg.Unit (fun _ ->
+               Flag.mode := NonTermination;
+               Model_check.use HorSat),
      " Check non-termination"]
 
 and spec_non_termination =
+  let module N = Flag.NonTermination in
   "Options for non-termination mode",
    ["-merge-paths",
-     Arg.Set Flag.NonTermination.merge_paths_of_same_branch,
+     Arg.Set N.merge_paths_of_same_branch,
      " Merge predicates of paths that have same if-branch information";
    "-refinement-log",
-     Arg.Set Flag.NonTermination.randint_refinement_log,
+     Arg.Set N.randint_refinement_log,
      " Write refinement types into log file (./refinement/[input file].refinement)";
    "-no-use-omega",
-     Arg.Clear Flag.NonTermination.use_omega,
+     Arg.Clear N.use_omega,
      " Do not use omega solver for under-approximation";
    "-use-omega-first",
-     Arg.Set Flag.NonTermination.use_omega_first,
+     Arg.Set N.use_omega_first,
      " Preferentially use omega solver for under-approximation\n(if failed, we then check with z3)"]
 
 and spec_fair_non_termination =
   "Options for fair non-termination mode",
   ["-fair-non-termination",
-     Arg.Unit Flag.(fun _ ->
-                    mode := FairNonTermination;
-                    ModelCheck.church_encode := true;
-                    ModelCheck.mc := ModelCheck.HorSatP),
+     Arg.Unit (fun _ ->
+               Flag.mode := FairNonTermination;
+               Model_check.(use HorSat2)),
      " Check fair-non-termination";
    "-expand-ce-iter-init",
      Arg.Set_int Flag.FairNonTermination.expand_ce_iter_init,
@@ -382,19 +412,28 @@ and print_option_and_exit () =
   !!arg_spec
   |> List.map Triple.fst
   |> List.filter (fun s -> s <> "" && s.[0] = '-')
-  |> List.iter @@ Format.printf "%s@.";
+  |> List.iter @@ Format.fprintf !Flag.Print.target "%s@.";
   exit 0
 
 let set_file name =
-  let name' =
-    match !Flag.pp with
-    | None -> name
-    | Some pp ->
-        let name' = Filename.change_extension name "pml" in
-        ignore @@ Sys.command @@ Format.sprintf "%s %s -o '%s'" pp name name';
-        name'
-  in
-  Flag.Input.(filenames := name' :: !filenames)
+  let ext = Filename.extension name in
+  match ext with
+  | "" | ".ml" ->
+      if ext = "" then warning "Treat %s as an implementation file" name;
+      let name' =
+        match !Flag.pp with
+        | None -> name
+        | Some pp ->
+            let name' = Filename.change_extension name "pml" in
+            ignore @@ Sys.command @@ Format.sprintf "%s %s -o '%s'" pp name name';
+            name'
+      in
+      Flag.IO.(filenames := name' :: !filenames)
+  | ".bin" | ".cegar" | ".debug" | ".smt2" ->
+      if !Flag.IO.filenames <> [] then unsupported "Multiple files for *%s (only the last file is used)" ext;
+      Flag.IO.(filenames := [name])
+  | _ -> unsupported "File with extension %s" ext
+
 
 let parse_arg_list has_head args =
   Arg.current := 0;
@@ -405,17 +444,50 @@ let parse_arg_list has_head args =
   | Arg.Bad s
   | Arg.Help s -> Format.eprintf "%s@." s; exit 1
   | End_of_file -> ()
-
-let read_option_conf () =
-  try
-    let args = IO.CPS.open_in "option.conf" (input_line |- String.split_blanc) in
-    parse_arg_list false args;
+let parse_arg_list' has_head args =
+    parse_arg_list has_head args;
     Flag.Log.args := !Flag.Log.args @ args
+
+let read_option_conf filename =
+  try
+    let read cin =
+      cin
+      |> IO.input_all
+      |> String.split_on_char '\n'
+      |> List.filter_out (String.starts_with -$- "#")
+      |> String.join " "
+      |> String.split_blanc
+    in
+    let args = IO.CPS.open_in filename read in
+    parse_arg_list' false args
   with
   | End_of_file -> ()
   | Sys_error _ -> ()
 
+let add_includes () =
+  let inc = Filename.change_extension !!Flag.IO.main "inc" in
+  if Sys.file_exists inc then
+    let s = IO.input_file inc in
+    if String.exists_stdlib (List.mem -$- ['\\'; '\"'; '\'']) s then
+      unsupported "%s" __FUNCTION__;
+    let args =
+      s
+      |> String.replace_chars (fun c -> if Char.is_whitespace c then " " else String.of_char c)
+      |> String.split_on_char ' '
+      |> List.remove_all -$- ""
+      |> List.flatten_map (fun dir -> ["-I"; dir])
+    in
+    parse_arg_list' false args
+
+let add_lib_dir () =
+  let lib = Filename.change_extension !!Flag.IO.main "lib" in
+  if Sys.file_exists lib && Sys.is_directory lib then
+    let args = ["-I"; lib] in
+    parse_arg_list' false args
+
 let parse_arg () =
   Arg.parse !!arg_spec set_file usage;
   Flag.Log.args := Array.to_list Sys.argv;
-  if not !Flag.Mode.ignore_conf then read_option_conf ()
+  if !Flag.IO.conf_file <> "" then read_option_conf !Flag.IO.conf_file;
+  if not !Flag.IO.ignore_inc && !Flag.IO.filenames <> [] then add_includes ();
+  if not !Flag.IO.ignore_lib && !Flag.IO.filenames <> [] then add_lib_dir ()

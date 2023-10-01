@@ -1,5 +1,0 @@
-name="csisat"
-description="CSIsat"
-archive(byte)="libcsisat.cma"
-archive(native)="libcsisat.cmxa"
-linkopts = "-cclib -lglpk"

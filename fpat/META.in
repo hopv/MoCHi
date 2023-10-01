@@ -1,7 +1,0 @@
-name="fpat"
-description="A framework for program analysis and transformation"
-version="0.2.0"
-requires = "REQUIRES"
-archive(byte)="fpat.cma"
-archive(native)="fpat.cmxa"
-linkopts = "-cclib -lfpat CCOPT"

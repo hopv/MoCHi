@@ -3,6 +3,7 @@ open Mochi_util
 open Syntax
 open Term_util
 open Type
+open Type_util
 open Modular_common
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
@@ -26,22 +27,22 @@ let normalize_ce_set (ce_set:ce_set) =
 
 let is_closed f def_env depth =
   let fs = take_funs_of_depth def_env f depth in
-  let def_env' = List.filter (fst |- Id.mem -$- fs) def_env in
+  let def_env' = List.filter (fst |- Id.List.mem -$- fs) def_env in
   let fv = List.flatten_map (snd |- get_fv) def_env' in
   let bv = List.flatten_map (fun (f,t) -> f :: fst (decomp_funs t)) def_env' in
   List.Set.subset ~eq:Id.eq fv bv
 
 let report_safe env =
-  Format.printf "Safe!@.@.";
-  Format.printf "Refinement types: %a@.@." Ref_type.Env.print env
+  Format.fprintf !Flag.Print.target "Safe!@.@.";
+  Format.fprintf !Flag.Print.target "Refinement types: %a@.@." Ref_type.Env.print env
 
 let report_unsafe neg_env ce_set =
   if !Flag.Abstract.used <> [] then
-    Format.printf "Unknown (because of abstraction options %a)" Print.(list string) !Flag.Abstract.used
+    Format.fprintf !Flag.Print.target "Unknown (because of abstraction options %a)" Print.(list string) !Flag.Abstract.used
   else
-    Format.printf "Unsafe!@.@.";
-  Format.printf "Negative refinement types: %a@.@." Ref_type.NegEnv.print neg_env;
-  Format.printf "Modular counterexamples: %a@.@." print_ce_set ce_set
+    Format.fprintf !Flag.Print.target "Unsafe!@.@.";
+  Format.fprintf !Flag.Print.target "Negative refinement types: %a@.@." Ref_type.NegEnv.print neg_env;
+  Format.fprintf !Flag.Print.target "Modular counterexamples: %a@.@." print_ce_set ce_set
 
 
 
@@ -63,7 +64,7 @@ let make_init_env _cmp bindings =
     let xs,_ = decomp_funs t in
     f,
     Id.typ f
-    |@> Trans.inst_tvar_typ Ty.unit
+    |@> Trans.instansiate_tvar_typ Ty.unit
     |> (if Id.is_external f then Ref_type.of_simple else to_weak)
     |> replace_with_top (List.length xs - 1)
   in
@@ -283,11 +284,11 @@ let rec last_def_to_fun t =
           f, xs
       in
       let desc = Local(Decl_let [f', make_funs xs' t1], t2) in
-      {t with desc}
+      make desc t.typ
   | Local(Decl_let _, {desc=Const Unit}) -> unsupported "last_def_to_fun"
   | Local(Decl_let defs, t2) ->
       let t2' = last_def_to_fun t2 in
-      {t with desc = Local(Decl_let defs, t2')}
+      make (Local(Decl_let defs, t2')) t.typ
   | _ ->
       Format.eprintf "%a@." Print.term t;
       assert false
@@ -302,7 +303,7 @@ let assert_to_fun t =
           match loop t2 with
           | `Unit, _ -> t1, t2
           | `Lifted, _ -> t, unit_term
-          | `Other, _ -> unsupported @@ Format.asprintf "top-level let-bindings of non-functions: %a" Print.term t1
+          | `Other, _ -> unsupported "top-level let-bindings of non-functions: %a" Print.term t1
         in
         `Lifted, make_let [f, make_fun u t1'] t2'
     | Local(Decl_let bindings, t) ->
@@ -319,11 +320,11 @@ let rec top_to_local_aux (f,t1) t =
   | Local(Decl_let [main,t2], {desc=Const Unit}) ->
       let t2' = make_let [f,t1] t2 in
       let desc = Local(Decl_let [main,t2'], unit_term) in
-      top_to_local {t with desc}
+      top_to_local (make desc t.typ)
   | Local(Decl_let bindings, t2) ->
       let used,bindings' =
         let aux (g,t3) =
-          if Id.mem f @@ get_fv t3 then
+          if Id.List.mem f @@ get_fv t3 then
             let typ = TFun(f, Id.typ g) in
             let g' = Id.set_typ g typ in
             Some(g, g'), (g', make_fun f t3)
@@ -344,9 +345,9 @@ let rec top_to_local_aux (f,t1) t =
         |> top_to_local_aux (f,t1)
       in
       let desc = Local(Decl_let bindings'', t2') in
-      top_to_local {t with desc}
+      top_to_local (make desc t.typ)
   | _ ->
-      assert (not @@ Id.mem f @@ get_fv t);
+      assert (not @@ Id.List.mem f @@ get_fv t);
       t
 
 and top_to_local t =
@@ -355,7 +356,7 @@ and top_to_local t =
       top_to_local_aux binding t2
   | Local(Decl_let [binding], t2) ->
       let desc = Local(Decl_let [binding], top_to_local t2) in
-      {t with desc}
+      make desc t.typ
   | Local(Decl_let _bindings, {desc=Const Unit}) ->
       unsupported "Modular.top_to_local (let ... and)"
   | Const Unit -> t
@@ -363,7 +364,7 @@ and top_to_local t =
       Format.eprintf "TOP_TO_LOCAL: %a@." Print.term t;
       assert false
 
-let main _ spec parsed =
+let main ext_typ ext_exc ext_mod_typ _orig spec parsed =
   Flag.Print.only_if_id := true;
   (*
   if spec <> Spec.init then unsupported "Modular.main: spec";
@@ -378,9 +379,9 @@ let main _ spec parsed =
     let pr s = Debug.printf "### %s:@.  %a@.@." s in
     let problem =
       if env <> [] then
-        Problem.ref_type_check parsed env
+        Problem.ref_type_check ~ext_typ ~ext_exc ~ext_mod_typ parsed env
       else
-        Problem.safety parsed
+        Problem.safety ~ext_typ ~ext_exc ~ext_mod_typ parsed
     in
     problem
     |@> pr "ORIG" Problem.print
@@ -401,7 +402,7 @@ let main _ spec parsed =
   Debug.printf "TOP_FUNS: %a@." (print_list Print.id_typ "@\n") @@ List.flatten_map (List.map fst) bindings;
   let non_fun = List.flatten_map (List.filter (fst |- is_fun_var |- not)) bindings in
   if non_fun <> [] then
-    unsupported @@ Format.asprintf "top-level let-bindings of non-functions %a" (List.print Id.print) @@ List.map fst non_fun;
+    unsupported "top-level let-bindings of non-functions %a" Print.(list id) @@ List.map fst non_fun;
   let fun_env = List.flatten bindings in
   let _,(main,_) = List.decomp_snoc fun_env in
   let typ = Ref_type.of_simple @@ Id.typ main in

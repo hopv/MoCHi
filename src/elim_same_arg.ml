@@ -1,7 +1,8 @@
 open Util
-open Syntax
-open Term_util
 open Type
+open Syntax
+open Type_util
+open Term_util
 
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
@@ -11,7 +12,7 @@ module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ en
 
 
 
-let update_const = make_col2 (fun _ _ -> ()) ()
+let update_const = Col2.make (fun _ _ -> ()) ()
 
 let update_constr_term t =
   match t with
@@ -22,7 +23,7 @@ let update_constr_term t =
       List.iter aux bindings;
       update_constr_term t2
   | Let _ -> unsupported "update_constr"
-  | _ -> update_constr.tr_term_rec t
+  | _ -> update_constr.term_rec t
 
   try
     Hashtbl.find tbl (i, j, Id.to_string f)
@@ -32,17 +33,17 @@ let update_constr_term t =
 
 
 
-let get_args = make_col2 [] List.rev_append
+let get_args = Col2.make [] List.rev_append
 
 let get_args_desc (f:id) desc =
   match desc with
-    App({desc=Var g}, ts) when Id.(f = g) ->
-      List.fold_left (fun args t -> get_args.col2_term f t @ args) ts ts
-  | _ -> get_args.col2_desc_rec f desc
+    App({desc=Var (LId g)}, ts) when Id.(f = g) ->
+      List.fold_left (fun args t -> get_args.term f t @ args) ts ts
+  | _ -> get_args.desc_rec f desc
 
-let () = get_args.col2_desc <- get_args_desc
+let () = get_args.desc <- get_args_desc
 
-let get_args = get_args.col2_term
+let get_args = get_args.term
 
 
 
@@ -79,10 +80,10 @@ let make_env xs same_args =
 
 
 
-let get_diff_args = make_col2 [] (@@@)
+let get_diff_args = Col2.make [] (@@@)
 
 let rec get_same_args env f t args =
-  let diff_args = get_diff_args.col2_term (env,f) t in
+  let diff_args = get_diff_args.term (env,f) t in
   let same_args = List.Set.(args - diff_args) in
   if same_args = args
   then args
@@ -94,11 +95,11 @@ let is_partial f ts =
 
 let get_diff_args_desc (env,f) desc =
   match desc with
-  | Var g when Id.(f = g) ->
+  | Var (LId g) when Id.(f = g) ->
      make_all @@ fst @@ decomp_tfun @@ Id.typ g
-  | App({desc=Var g}, ts) when Id.(f = g) && is_partial g ts ->
+  | App({desc=Var (LId g)}, ts) when Id.(f = g) && is_partial g ts ->
      make_all @@ fst @@ decomp_tfun @@ Id.typ g
-  | App({desc=Var g}, ts) when Id.(f = g) ->
+  | App({desc=Var (LId g)}, ts) when Id.(f = g) ->
       let its = List.mapi (fun i t -> i,t) ts in
       let rec aux acc = function
           [] -> acc
@@ -107,7 +108,7 @@ let get_diff_args_desc (env,f) desc =
             let diff' = List.flatten diff in
             aux (diff' @ acc) its'
       in
-      let diff_args = List.flatten @@ List.map (get_diff_args.col2_term (env,f)) ts in
+      let diff_args = List.flatten @@ List.map (get_diff_args.term (env,f)) ts in
       aux diff_args its
   | Local(Decl_let ([_] as bindings), t) ->
       let aux (g,t') =
@@ -115,16 +116,16 @@ let get_diff_args_desc (env,f) desc =
         let all = make_all xs in
         let same_args = get_same_args env g t all in
         let env' = make_env xs same_args in
-        get_diff_args.col2_term (env'@env,f) t'
+        get_diff_args.term (env'@env,f) t'
       in
-      let diff_args = get_diff_args.col2_term (env,f) t in
+      let diff_args = get_diff_args.term (env,f) t in
       List.flatten (List.map aux bindings) @ diff_args
-  | Local(Decl_let _bindings, _t) -> raise (Fatal "Not implemented (get_diff_args)")
-  | _ -> get_diff_args.col2_desc_rec (env,f) desc
+  | Local(Decl_let _bindings, _t) -> failwith "Not implemented (get_diff_args)"
+  | _ -> get_diff_args.desc_rec (env,f) desc
 
-let () = get_diff_args.col2_desc <- get_diff_args_desc
+let () = get_diff_args.desc <- get_diff_args_desc
 
-let get_diff_args env f t = get_diff_args.col2_term (env,f) t
+let get_diff_args env f t = get_diff_args.term (env,f) t
 
 
 
@@ -134,18 +135,18 @@ let elim_nth ns xs = xs
 
 
 
-let elim_arg = make_trans2 ()
+let elim_arg = Tr2.make ()
 
 let elim_arg_desc (f,args) desc =
   match desc with
-    App({desc=Var g}, ts) when Id.(f = g) ->
-      let ts' = List.map (elim_arg.tr2_term (f,args)) @@ elim_nth args ts in
+    App({desc=Var (LId g)}, ts) when Id.(f = g) ->
+      let ts' = List.map (elim_arg.term (f,args)) @@ elim_nth args ts in
       App(make_var g, ts')
-  | _ -> elim_arg.tr2_desc_rec (f,args) desc
+  | _ -> elim_arg.desc_rec (f,args) desc
 
-let () = elim_arg.tr2_desc <- elim_arg_desc
+let () = elim_arg.desc <- elim_arg_desc
 
-let elim_arg f args t = elim_arg.tr2_term (f,args) t
+let elim_arg f args t = elim_arg.term (f,args) t
 
 
 
@@ -163,7 +164,7 @@ let elim_arg_typ args typ =
 
 
 
-let trans = make_trans2 ()
+let trans = Tr2.make ()
 
 let trans_desc env desc =
   match desc with
@@ -187,30 +188,29 @@ let trans_desc env desc =
       in
       if Debug.check() then
         begin
-          Color.printf Color.Reverse "%a: [" Id.print f;
-          List.iter (fun (x,y) -> Color.printf Color.Reverse "%d,%d; " x y) same_args';
-          Color.printf Color.Reverse "]@."
+          Color.printf Reverse "%a: [" Id.print f;
+          List.iter (fun (x,y) -> Color.printf Reverse "%d,%d; " x y) same_args';
+          Color.printf Reverse "]@."
         end;
       let elim_args = List.map snd same_args' in
       let f' = Id.map_typ (elim_arg_typ elim_args) f in
       let xs' = elim_nth elim_args xs in
       let t1' = t1
-                |> trans.tr2_term (make_env xs same_args' @ env)
+                |> trans.term (make_env xs same_args' @ env)
                 |> subst_map @@ List.map (fun (i,j) -> List.nth xs j, make_var @@ List.nth xs i) same_args'
                 |> elim_arg f elim_args
                 |> subst_var f f'
       in
       let t2' = t2
-                |> trans.tr2_term env
+                |> trans.term env
                 |> elim_arg f elim_args
                 |> subst_var f f'
       in
       Local(Decl_let [f',make_funs xs' t1'], t2')
-  | _ -> trans.tr2_desc_rec env desc
+  | _ -> trans.desc_rec env desc
 
-let () = trans.tr2_desc <- trans_desc
+let () = trans.desc <- trans_desc
 
 (** Assume that the input is in CPS *)
 let trans t =
-  assert (is_id_unique t);
-  trans.tr2_term [] t
+  trans.term [] t

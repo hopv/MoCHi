@@ -189,7 +189,7 @@ let refine labeled is_cp _prefix ces ext_ces prog =
       Color.set Color.Green !Flag.Log.cegar_loop !!Time.get Color.reset;
     set_status @@ Flag.Log.Other (Format.sprintf "(%d-4) Predicate discovery" !Flag.Log.cegar_loop);
     if Flag.Refine.use_prefix_trace then
-      fatal "Not implemented: Flag.use_prefix_trace";
+      failwith "Not implemented: Flag.use_prefix_trace";
     let map =
       let ces,ext_ces =
         if !Flag.Refine.use_multiple_paths then
@@ -232,24 +232,22 @@ let refine labeled is_cp _prefix ces ext_ces prog =
 let refine_with_ext labeled is_cp _prefix ces ext_ces prog =
   let tmp = Time.get () in
   try
-    if !Flag.Print.progress then
-      Color.printf
-        Color.Green
-        "(%d-4)[%.3f] Discovering predicates (feasible case) ... @."
-        !Flag.Log.cegar_loop !!Time.get;
+    Verbose.printf ~color:Green
+      "(%d-4)[%.3f] Discovering predicates (feasible case) ... @."
+      !Flag.Log.cegar_loop !!Time.get;
     set_status @@ Flag.Log.Other (Format.sprintf "(%d-4) Predicate discovery" !Flag.Log.cegar_loop);
     if Flag.Refine.use_prefix_trace then
-      raise (Fatal "Not implemented: Flag.use_prefix_trace");
-    Format.printf "@[<v>";
+      failwith "Not implemented: Flag.use_prefix_trace";
+    Format.fprintf !Flag.Print.target "@[<v>";
     let map = FpatInterface.infer_with_ext labeled is_cp ces ext_ces prog in
-    Format.printf "@]";
+    Format.fprintf !Flag.Print.target "@]";
     let env =
       if !Flag.Refine.disable_predicate_accumulation then
         map
       else
         add_preds_env map prog.env
     in
-    if !Flag.Print.progress then Format.printf "DONE!@.@.";
+    Verbose.printf "DONE!@.@.";
     refine_post tmp;
     map, {prog with env}
   with e ->
@@ -270,14 +268,14 @@ let print_list fm = function
 let refine_rank_fun ce ex_ce prog =
   let tmp = Time.get () in
   try
-    (*Format.printf "(%d)[refine_rank_fun] %a @." !Flag.cegar_loop print_list ce;
-      Format.printf "    %a@." (print_prog_typ' [] []) { env=env; defs=defs; main=main };*)
-    if !Flag.Print.progress then Format.printf "(%d-4)[%.3f] Discovering ranking function ... @." !Flag.Log.cegar_loop !!Time.get;
+    (*Format.fprintf !Flag.Print.target "(%d)[refine_rank_fun] %a @." !Flag.cegar_loop print_list ce;
+      Format.fprintf !Flag.Print.target "    %a@." (print_prog_typ' [] []) { env=env; defs=defs; main=main };*)
+    Verbose.printf "(%d-4)[%.3f] Discovering ranking function ... @." !Flag.Log.cegar_loop !!Time.get;
     set_status @@ Flag.Log.Other (Format.sprintf "(%d-4) Ranking function discovery" !Flag.Log.cegar_loop);
     let env, spc =
-      Format.printf "@[<v>";
+      Format.fprintf !Flag.Print.target "@[<v>";
       let env, spc = FpatInterface.compute_strongest_post prog ce ex_ce in
-      Format.printf "@]";
+      Format.fprintf !Flag.Print.target "@]";
       env, spc
     in
 
@@ -286,17 +284,17 @@ let refine_rank_fun ce ex_ce prog =
       then
         let progWithExparam = Option.get prog.info.exparam_orig in
         Debug.printf "REFINE: %a@." CEGAR_print.prog @@ Option.get prog.info.exparam_orig;
-        Format.printf "@[<v>";
+        Format.fprintf !Flag.Print.target "@[<v>";
         let _, spcWithExparam = FpatInterface.compute_strongest_post progWithExparam ce ex_ce in
-        Format.printf "@]";
+        Format.fprintf !Flag.Print.target "@]";
         Debug.printf "REFINE: %a@." Fpat.Formula.pr spcWithExparam;
         spcWithExparam
       else spc (* dummy *)
     in
 
     (* TEMPORARY *)
-    (*Format.printf "[exparam]@.%a@." FpatInterface.Formula.pr spcWithExparam;
-      Format.printf "[instantiated]@.%a@." FpatInterface.Formula.pr spc;*)
+    (*Format.fprintf !Flag.Print.target "[exparam]@.%a@." FpatInterface.Formula.pr spcWithExparam;
+      Format.fprintf !Flag.Print.target "[instantiated]@.%a@." FpatInterface.Formula.pr spc;*)
 
     raise (PostCondition (env, spc, spcWithExparam))
   with e ->

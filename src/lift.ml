@@ -1,7 +1,8 @@
 open Util
+open Type
+open Type_util
 open Syntax
 open Term_util
-open Type
 
 module RT = Ref_type
 
@@ -26,7 +27,7 @@ let get_rtyp_lift t f rtyp =
 let get_rtyp_lift t f rtyp =
   let rtyp' = get_rtyp_lift t f rtyp in
   if !!Flag.Debug.print_ref_typ
-  then Format.printf "LIFT: %a: @[@[%a@]@ ==>@ @[%a@]@]@." Id.print f RT.print rtyp RT.print rtyp';
+  then Format.fprintf !Flag.Print.target "LIFT: %a: @[@[%a@]@ ==>@ @[%a@]@]@." Id.print f RT.print rtyp RT.print rtyp';
   rtyp'
 
 module Id' = struct
@@ -45,7 +46,7 @@ module Id' = struct
       count_pred z,
       Id.to_string z
     in
-    if dbg then Format.printf "%a, %a@." Print.id_typ x Print.id_typ y;
+    if dbg then Format.fprintf !Flag.Print.target "%a, %a@." Print.id_typ x Print.id_typ y;
         Compare.on aux x y
 end
 
@@ -56,32 +57,32 @@ let (@@@) = IdSet.union
 
 let filter_base = IdSet.filter @@ is_base_typ -| Id.typ
 
-let get_fv' = make_col2 IdSet.empty IdSet.union
+let get_fv' = Col2.make IdSet.empty IdSet.union
 
 let get_fv'_term vars t =
   match t.desc with
-  | Var x -> if IdSet.mem x vars then IdSet.empty else IdSet.singleton x
+  | Var (LId x) -> if IdSet.mem x vars then IdSet.empty else IdSet.singleton x
   | Local(Decl_let bindings, t2) ->
       let vars' = List.fold_left (fun vars (f,_) -> IdSet.add f vars) vars bindings in
-      let aux fv (_,t) = fv @@@ get_fv'.col2_term vars' t in
-      let fv_t2 = get_fv'.col2_term vars' t2 in
+      let aux fv (_,t) = fv @@@ get_fv'.term vars' t in
+      let fv_t2 = get_fv'.term vars' t2 in
       List.fold_left aux fv_t2 bindings
-  | Fun(x,t) -> get_fv'.col2_term (IdSet.add x vars) t
+  | Fun(x,t) -> get_fv'.term (IdSet.add x vars) t
   | Match(t,pats) ->
       let aux acc (pat,t) =
         let vars' = vars @@@ set_of_list @@ get_bv_pat pat in
-        get_fv'.col2_term vars' t @@@ acc
+        get_fv'.term vars' t @@@ acc
       in
-      List.fold_left aux (get_fv'.col2_term vars t) pats
-  | _ -> get_fv'.col2_term_rec vars t
+      List.fold_left aux (get_fv'.term vars t) pats
+  | _ -> get_fv'.term_rec vars t
 
-let () = get_fv'.col2_term <- get_fv'_term
-let get_fv' t = get_fv'.col2_term IdSet.empty t
+let () = get_fv'.term <- get_fv'_term
+let get_fv' t = get_fv'.term IdSet.empty t
 
 let succ_postfix post =
   try
     match String.split_on_char '_' post with
-    | ""::fid::rest when fid.[0] = 'f' ->
+    | ""::fid::rest when fid <> "" &&  fid.[0] = 'f' ->
         let n' = if fid = "f" then 2 else int_of_string (String.tl fid) + 1 in
         Format.sprintf "f%d_%s" n' @@ String.join "_" rest
     | _ -> "f" ^ post
@@ -115,7 +116,7 @@ let rec lift_aux post xs t =
           let aux (f,_) =
             let tfun x ty =
               let x' =
-                let has_no_true_pred = List.for_all (function TARefPred(_, t) -> t.desc <> Const True | _ -> true) -| fst -| Type.decomp_tattr in
+                let has_no_true_pred = List.for_all (function TARefPred(_, t) -> t.desc <> Const True | _ -> true) -| fst -| decomp_tattr in
                 if !Flag.PredAbst.shift_pred && is_base_var x && has_no_true_pred (Id.typ x) then
                   Id.map_typ (_TAttr [TARefPred(Id.new_var_id x, Term.true_)]) x
                 else
@@ -132,7 +133,7 @@ let rec lift_aux post xs t =
         let aux (f,t1) =
           let ys,t1 = decomp_funs t1 in
           let ys' = fv @ ys in
-          let f',_ = List.assoc f fs in
+          let f',_ = Id.List.assoc f fs in
           let defs1,t1' = lift_aux ("_" ^ Id.name f) (set_of_list ys') (subst_f t1) in
           (f',(ys',t1'))::defs1
         in
@@ -162,9 +163,9 @@ let rec lift_aux post xs t =
         let defs1,t1' = lift_aux post xs t1 in
         let defs2,t2' = lift_aux post xs t2 in
         defs1 @ defs2, Cons(t1',t2')
-    | Constr(c,ts) ->
+    | Constr(b,c,ts) ->
         let defss,ts' = List.split_map (lift_aux post xs) ts in
-        List.flatten defss, Constr(c,ts')
+        List.flatten defss, Constr(b,c,ts')
     | Match(t,pats) ->
         let defs,t' = lift_aux post xs t in
         let aux (pat,t) (defs,pats) =
@@ -195,7 +196,7 @@ let rec lift_aux post xs t =
         defs1 @ defs2, Subset(t1',t2')
     | _ -> Format.eprintf "lift: %a@." Print.term t; assert false
   in
-  defs, {t with desc}
+  defs, make desc t.typ
 
 let lift ?(args=[]) t =
   lift_aux "" (set_of_list args) t,
@@ -252,7 +253,7 @@ let rec lift_aux' post xs t =
         let aux (f,t1) =
           let ys,t1 = decomp_funs t1 in
           let ys' = fv @ ys in
-          let f' = fst (List.assoc f fs) in
+          let f' = fst (Id.List.assoc f fs) in
           let defs1,t1' = lift_aux' ("_" ^ Id.name f) (set_of_list ys') (subst_f t1) in
           (f',(ys',t1'))::defs1
         in
@@ -282,9 +283,9 @@ let rec lift_aux' post xs t =
         let defs1,t1' = lift_aux' post xs t1 in
         let defs2,t2' = lift_aux' post xs t2 in
         defs1 @ defs2, Cons(t1',t2')
-    | Constr(c,ts) ->
+    | Constr(b,c,ts) ->
         let defss,ts' = List.split_map (lift_aux' post xs) ts in
-        List.flatten defss, Constr(c,ts')
+        List.flatten defss, Constr(b,c,ts')
     | Match(t,pats) ->
         let defs,t' = lift_aux' post xs t in
         let aux (pat,t) (defs,pats) =
@@ -303,7 +304,7 @@ let rec lift_aux' post xs t =
     | Bottom -> [], Bottom
     | _ -> Format.eprintf "lift: %a@." Print.term t; assert false
   in
-  defs, {t with desc}
+  defs, make desc t.typ
 
 let lift' ?(args=[]) t =
   lift_aux' "" (set_of_list args) t, get_rtyp_lift t

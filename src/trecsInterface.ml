@@ -7,14 +7,10 @@ exception UnknownOutput
 
 type counterexample = int list
 
-type result =
-  | Safe of (var * Inter_type.t) list
-  | Unsafe of counterexample
-
 type state = int
 type input = string
 
-type spec = (state * input * state list) list
+type spec_safety = (state * input * state list) list
 
 module TS = Trecs_syntax
 
@@ -81,30 +77,33 @@ let trans_ce ce =
 
 
 let rec verifyFile filename =
-  let p1,p2 = !Flag.TRecS.param1, !Flag.TRecS.param2 in
-  let result_file = Filename.change_extension !!Flag.Input.main "trecs_out" in
-  let oc = open_out result_file in
-  let out_descr = Unix.descr_of_out_channel oc in
-  let args = String.split_on_string ~by:" " (Format.sprintf "%s -p %d %d %s" !Flag.ModelCheck.trecs p1 p2 filename) in
-  let pid = Unix.create_process (List.hd args) (Array.of_list args) Unix.stdin out_descr Unix.stderr in
-  let _,_st =
-    try
-      Unix.waitpid [Unix.WUNTRACED] pid
-    with e -> Unix.kill pid 14; raise e
-  in
-  close_out oc;
-  let ic = open_in result_file in
-  let r = Trecs_parser.output Trecs_lexer.token @@ Lexing.from_channel ic in
-  close_in ic;
-  match r with
-  | TS.Safe env ->
-      Safe env
-  | TS.Unsafe trace ->
-      Unsafe (trans_ce trace)
-  | TS.TimeOut ->
-      Verbose.printf "Restart TRecS (param: %d -> %d)@." p1 (2*p1);
-      Flag.TRecS.param1 := 2 * p1;
-      verifyFile filename
+  match !Flag.ModelCheck.trecs with
+  | None -> assert false
+  | Some trecs ->
+      let p1,p2 = !Flag.TRecS.param1, !Flag.TRecS.param2 in
+      let result_file = Filename.change_extension !!Flag.IO.temp "trecs_out" in
+      let oc = open_out result_file in
+      let out_descr = Unix.descr_of_out_channel oc in
+      let args = String.split_on_string ~by:" " (Format.sprintf "%s -p %d %d %s" trecs p1 p2 filename) in
+      let pid = Unix.create_process (List.hd args) (Array.of_list args) Unix.stdin out_descr Unix.stderr in
+      let _,_st =
+        try
+          Unix.waitpid [Unix.WUNTRACED] pid
+        with e -> Unix.kill pid 14; raise e
+      in
+      close_out oc;
+      let ic = open_in result_file in
+      let r = Trecs_parser.output Trecs_lexer.token @@ Lexing.from_channel ic in
+      close_in ic;
+      match r with
+      | TS.Safe env ->
+          Model_check_common.SSafe env
+      | TS.Unsafe trace ->
+          SUnsafe (trans_ce trace)
+      | TS.TimeOut ->
+          Verbose.printf "Restart TRecS (param: %d -> %d)@." p1 (2*p1);
+          Flag.TRecS.param1 := 2 * p1;
+          verifyFile filename
 
 
 let write_log filename target =
@@ -113,7 +112,7 @@ let write_log filename target =
   close_out cout
 
 
-let check target =
+let check_safety target =
   let target' = trans target in
   let ext =
     if !Flag.ModelCheck.rename_hors then
@@ -121,28 +120,30 @@ let check target =
     else
       "hors"
   in
-  let input = Filename.change_extension !!Flag.Input.main ext in
+  let input = Filename.change_extension !!Flag.IO.temp ext in
   try
     write_log input target';
     verifyFile input
   with
   | Failure("lex error") -> raise UnknownOutput
-  | End_of_file -> fatal "TRecS failed"
+  | End_of_file -> failwith "TRecS failed"
 
 
-(* returen "" if the version cannot be obtained *)
 let version () =
-  let cin,cout = Unix.open_process (Format.sprintf "%s -help" !Flag.ModelCheck.trecs) in
-  let v =
-    try
-      let s = input_line cin in
-      if Str.string_match (Str.regexp "TRecS \\([.0-9]+\\)") s 0
-      then Some (String.sub s (Str.group_beginning 1) (Str.group_end 1 - Str.group_beginning 1))
-      else None
-    with Sys_error _ | End_of_file -> None
-  in
-  ignore @@ Unix.close_process (cin, cout);
-  v
+  match !Flag.ModelCheck.trecs with
+  | None -> None
+  | Some trecs ->
+      let cin,cout = Unix.open_process (Format.sprintf "%s -help" trecs) in
+      let v =
+        try
+          let s = input_line cin in
+          if Str.string_match (Str.regexp "TRecS \\([.0-9]+\\)") s 0
+          then Some (String.sub s (Str.group_beginning 1) (Str.group_end 1 - Str.group_beginning 1))
+          else None
+        with Sys_error _ | End_of_file -> None
+      in
+      ignore @@ Unix.close_process (cin, cout);
+      v
 
 let make_label_spec n q =
   let rec aux i spec =
@@ -152,7 +153,7 @@ let make_label_spec n q =
   in
   aux n []
 
-let make_file_spec () : spec =
+let make_file_spec () : spec_safety =
   [0, "unit", [];
    0, "event_newr", [1];
    1, "event_read", [1];
@@ -169,9 +170,9 @@ let make_file_spec () : spec =
    4, "unit", [];]
 
 
-let make_base_spec n q : spec = (q, "br", [q;q])::make_label_spec n q
+let make_base_spec n q : spec_safety = (q, "br", [q;q])::make_label_spec n q
 
-let make_spec n : spec =
+let make_spec_safety n : spec_safety =
   let spec =
     match !Flag.mode with
     | Flag.Reachability

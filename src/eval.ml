@@ -1,6 +1,8 @@
-open Util
-open Syntax
-open Term_util
+open! Util
+open! Type
+open! Syntax
+open! Type_util
+open! Term_util
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
 
@@ -9,7 +11,7 @@ exception EventFail
 exception ReachLimit
 exception ReachBottom
 
-let fix f v = {desc=Label(InfoId f, v); typ = v.typ; attr=[]}
+let fix f v = make_label (InfoId f) v
 let rec fun_info args_rev f t =
   match t.desc with
   | Fun(x,t1) -> make_fun x (fun_info (x::args_rev) f t1)
@@ -22,14 +24,14 @@ let rec fun_info args_rev f t =
 let fun_info f v = fun_info [] f v
 
 
-let subst_arg = make_trans2 ()
+let subst_arg = Tr2.make ()
 let subst_arg_term (x,t) t' =
   match t'.desc with
   | Label(InfoId y, t1) when Id.(x = y) -> make_label (InfoTerm t) t1
-  | _ -> subst_arg.tr2_term_rec (x,t) t'
+  | _ -> subst_arg.term_rec (x,t) t'
 
-let () = subst_arg.tr2_term <- subst_arg_term
-let subst_arg x t t' = subst_arg.tr2_term (x,t) t'
+let () = subst_arg.term <- subst_arg_term
+let subst_arg x t t' = subst_arg.term (x,t) t'
 
 
 let rec take_args = function
@@ -62,7 +64,7 @@ let rec eval_print fm cnt limit gen t =
   | Const _ -> t
   | End_of_definitions -> t
   | Var y when is_length_var y -> t
-  | Var _ -> unsupported "error trace with external funcitons"
+  | Var _ -> unsupported "error trace with external funcitons (%a)" Print.term t
   | Fun _ -> t
   | App(t1, ts) ->
       let vs = List.fold_right (fun t acc -> eval_print fm cnt limit gen t :: acc) (t1::ts) [] in
@@ -95,6 +97,10 @@ let rec eval_print fm cnt limit gen t =
       if bool_of_term v1
       then true_term
       else eval_print fm cnt limit gen t2
+  | BinOp(Eq, t1, _) when t1.typ = Ty.bool ->
+      let v1 = eval_print fm cnt limit gen t1 in
+      let v2 = eval_print fm cnt limit gen t1 in
+      Term.bool (v1.desc = v2.desc)
   | BinOp(op, t1, t2) ->
       let v2 = eval_print fm cnt limit gen t2 in
       let v1 = eval_print fm cnt limit gen t1 in
@@ -118,17 +124,17 @@ let rec eval_print fm cnt limit gen t =
       make_bool @@ not @@ bool_of_term v1
   | Event("fail",false) -> raise EventFail
   | Event _ -> assert false
-  | Record _fields -> raise (Fatal "Not implemented: eval_print Record")
-  | Field _ -> raise (Fatal "Not implemented: eval_print Record")
-  | SetField _ -> raise (Fatal "Not implemented: eval_print Record")
+  | Record _fields -> failwith "Not implemented: eval_print Record"
+  | Field _ -> failwith "Not implemented: eval_print Record"
+  | SetField _ -> failwith "Not implemented: eval_print Record"
   | Nil -> t
   | Cons(t1,t2) ->
       let v2 = eval_print fm cnt limit gen t2 in
       let v1 = eval_print fm cnt limit gen t1 in
       make_cons v1 v2
-  | Constr(s,ts) ->
+  | Constr(b,s,ts) ->
       let vs = List.fold_right (fun t acc -> eval_print fm cnt limit gen t :: acc) ts [] in
-      {desc=Constr(s,vs); typ=t.typ; attr=[]}
+      make (Constr(b,s,vs)) t.typ
   | Match(t1,pat::pats) ->
       let merge r1 r2 =
         match r1, r2 with
@@ -147,8 +153,8 @@ let rec eval_print fm cnt limit gen t =
               | None -> None
               | Some f -> Some (f -| subst x v)
             end
-        | Constr(s, vs), PConstr(s', ps) ->
-            if s <> s'
+        | Constr(b, s, vs), PConstr(b', s', ps) ->
+            if s <> s' || b <> b'
             then None
             else
               let aux bind v p =
@@ -230,7 +236,7 @@ let rec eval_print fm cnt limit gen t =
       in
       Format.fprintf fm "@]";
       r
-  | _ -> unsupported (Format.asprintf "%a" Print.constr t)
+  | _ -> unsupported "Eval (%a)" Print.desc_constr t.desc
 
 exception CoerceAbstraction
 
@@ -247,9 +253,9 @@ let print fm (ce, {Problem.term=t}) =
   try
     ignore @@ eval_print fm cnt limit gen t;
     if !Flag.Abstract.used <> [] then raise CoerceAbstraction;
-    assert false
+    [%unsupported]
   with
   | RaiseExcep _ -> Format.fprintf fm "@\nUNCAUGHT EXCEPTION OCCUR!@\n"
   | EventFail -> Format.fprintf fm "@\nFAIL!@\n"
   | CoerceAbstraction -> Format.fprintf fm "@\nThis is not a counterexample@\nDisable abstraction options@\n"
-  | Unsupported s -> Format.printf "@\nUnsupported: %s@\n" s
+  | Unsupported s -> Format.fprintf !Flag.Print.target "@\nUnsupported: %s@\n" s

@@ -1,8 +1,9 @@
 open Util
 open Mochi_util
+open Type
+open Type_util
 open Syntax
 open Term_util
-open Type
 open Fair_termination_type
 open Fair_termination_util
 
@@ -56,27 +57,28 @@ let join x y =
   | _, None -> x
   | Some _, Some _ -> assert false
 
-let trans = make_tr_col2 None join
+let trans = Tr_col2.make None join
 
 let rec trans_value env v =
-  let _,typ = trans.tr_col2_typ env v.typ in
+  let _,typ = trans.typ env v.typ in
   match v.desc with
-  | Var x -> make_var @@ Id.set_typ x typ
-  | BinOp(op, v1, v2) -> {v with desc=BinOp(op, trans_value env v1, trans_value env v2); typ}
-  | Not v -> {v with desc=Not (trans_value env v); typ}
-  | Tuple vs -> {v with desc=Tuple(List.map (trans_value env) vs); typ}
-  | Proj(i,v) -> {v with desc=Proj(i, trans_value env v); typ}
-  | _ -> {v with typ}
+  | Var (LId x) -> make_var @@ Id.set_typ x typ
+  | Var _ -> assert false
+  | BinOp(op, v1, v2) -> make (BinOp(op, trans_value env v1, trans_value env v2)) typ
+  | Not v -> make (Not (trans_value env v)) typ
+  | Tuple vs -> make (Tuple(List.map (trans_value env) vs)) typ
+  | Proj(i,v) -> make (Proj(i, trans_value env v)) typ
+  | _ -> set_typ v typ
 
 let trans_typ env typ =
   match typ with
-  | TFun(x,typ) -> trans.tr_col2_typ env (TFuns([x],typ))
+  | TFun(x,typ) -> trans.typ env (TFuns([x],typ))
   | TFuns(xs,typ1) ->
-      let xs' = List.map (Id.map_typ @@ snd -| trans.tr_col2_typ env) xs in
-      let _,typ1' = trans.tr_col2_typ env typ1 in
+      let xs' = List.map (Id.map_typ @@ snd -| trans.typ env) xs in
+      let _,typ1' = trans.typ env typ1 in
       let xs'',x = List.decomp_snoc xs' in
       None, TFuns(xs'' @ [env.s; env.set_flag] @ env.ps @ [x], make_tpair (Id.typ env.s) typ1')
-  | _ -> trans.tr_col2_typ_rec env typ
+  | _ -> trans.typ_rec env typ
 
 (* Assume that input is in normal form *)
 let trans_term env t =
@@ -110,27 +112,27 @@ let trans_term env t =
       in
       None, aux v1' v1.typ vs'
   | If(v1, t2, t3) ->
-      let vs2,t2' = trans.tr_col2_term env t2 in
-      let vs3,t3' = trans.tr_col2_term env t3 in
+      let vs2,t2' = trans.term env t2 in
+      let vs3,t3' = trans.term env t3 in
       Debug.printf "t2': %a@." Print.term t2';
       Debug.printf "t3': %a@." Print.term t3';
       join vs2 vs3, make_if v1 t2' t3'
   | Local(Decl_let [x,t1], t2) when not @@ Id.(x = env.target) && [] = fst @@ decomp_funs t1 ->
       Debug.printf "START@.";
       Debug.printf "t1: %a@." Print.term t1;
-      let vs1,t1' = trans.tr_col2_term env t1 in
+      let vs1,t1' = trans.term env t1 in
       Debug.printf "t1': %a@." Print.term t1';
       let sx = Id.set_typ (Id.add_name_before "s__" @@ new_var_of_term t1) t1'.typ in
       let s' = Id.new_var_id env.s in
-      let vs2,t2' = trans.tr_col2_term {env with s=s'} t2 in
-      let _,x' = trans.tr_col2_var env x in
+      let vs2,t2' = trans.term {env with s=s'} t2 in
+      let _,x' = trans.var env x in
       Debug.printf "sx: %a@." Print.id_typ sx;
       join vs1 vs2, make_lets [sx,t1'; s',make_fst(make_var sx); x',make_snd(make_var sx)] t2'
   | Local(Decl_let bindings, t2) ->
       let aux (g,t1) =
         let xs,t1 = decomp_funs t1 in
-        if xs = [] then unsupported @@ Format.asprintf "fair termination!? %a" Print.id g;
-        let _,g' = trans.tr_col2_var env g in
+        if xs = [] then unsupported "fair termination!? %a" Print.id g;
+        let _,g' = trans.var env g in
         let g_true = Id.new_var_id g' in
         let xss =
           let rec aux typ xs =
@@ -176,7 +178,7 @@ let trans_term env t =
                       List.mapi (fun i p'' -> p'', make_proj i @@ make_snd @@ make_var sp) ps''
               in
               Debug.printf "t1: %a@." Print.term t1;
-              let vs,t1''' = trans.tr_col2_term {env with s=s''; ps=ps''; set_flag=set_flag''} t1 in
+              let vs,t1''' = trans.term {env with s=s''; ps=ps''; set_flag=set_flag''} t1 in
               assert (vs = None);
               make_lets bindings' t1'''
             in
@@ -190,10 +192,10 @@ let trans_term env t =
             in
             Some (rank_var, ps', xs'), t1''''
           else
-            trans.tr_col2_term {env with s=s'; set_flag=set_flag'} t1
+            trans.term {env with s=s'; set_flag=set_flag'} t1
         in
         Debug.printf "g'[%d]: %a@." (List.length env.ps) Print.id_typ g';
-        let xss' = List.map (List.map @@ snd -| trans.tr_col2_var env) xss in
+        let xss' = List.map (List.map @@ snd -| trans.var env) xss in
         let aux (s,set_flag,ps) xs (first,t) =
           let t' = if first then t else make_pair (make_var s) t in
           let xs',x = List.decomp_snoc xs in
@@ -218,14 +220,14 @@ let trans_term env t =
       in
       let vss,bindingss = List.split_map aux bindings in
       let bindings' = List.flatten bindingss in
-      let vs2,t2' = trans.tr_col2_term env t2 in
+      let vs2,t2' = trans.term env t2 in
       List.fold_left join vs2 vss, make_let bindings' t2'
   | _ ->
       Debug.printf "%a@." Print.term t;
-      unsupported @@ Format.asprintf "Fair termination [%a]" Print.constr t
+      unsupported "%s" __FUNCTION__
 
-let () = trans.tr_col2_typ <- trans_typ
-let () = trans.tr_col2_term <- trans_term
+let () = trans.typ <- trans_typ
+let () = trans.term <- trans_term
 
 let rec get_top_fun_typ f t =
   match t.desc with
@@ -246,11 +248,11 @@ let trans target fairness t =
   let s, set_flag, ps = make_extra_vars states target_xs in
   Debug.printf "ps: %a@." (List.print Print.id) ps;
   let env = {target; target_xs; target_result_typ; states; fairness; s; set_flag; ps} in
-  let vs,t' = trans.tr_col2_term env t in
+  let vs,t' = trans.term env t in
   let bindings =
     (s, make_s_init states) ::
     (set_flag, false_term) ::
-    List.map (fun p -> p, make_term @@ Id.typ p) ps
+    List.map (Pair.add_right (make_default_term -| Id.typ)) ps
   in
   vs,make_lets bindings t'
 
@@ -269,7 +271,7 @@ let verify_with rank_var rank_funs prev_vars arg_vars exparam_sol t =
   let ts = List.map fst @@ Trans.split_assert t'' in
   Debug.printf "BEFORE:@.%a@." Print.term t'';
   Debug.printf "HEAD:@.%a@." Print.term @@ List.hd ts;
-  List.for_all (fun t -> incr Flag.FairTermination.loop_count; Main_loop.run ~exparam_sol @@ Problem.safety t) ts
+  List.for_all (fun t -> incr Flag.FairTermination.loop_count; Main_loop.run ~exparam_sol (Some (Problem.safety t))) ts
 
 let rec main_loop rank_var rank_funs prev_vars arg_vars exparam_sol spcs spcWithExparams preds_info(*need?*) t =
   try
@@ -296,7 +298,7 @@ let rec main_loop rank_var rank_funs prev_vars arg_vars exparam_sol spcs spcWith
         Fpat.RankFunInfer.lrf !Flag.Termination.add_closure_exparam spcs' spcWithExparams' (*all_vars*) arg_vars' prev_vars'
       in
       let rank_funs' = List.map (fun (coeffs,const) -> {coeffs; const}) @@ fst solution in
-      let exparam_sol' = List.map (Pair.map_fst (Id.from_string -$- Ty.int)) @@ snd solution in
+      let exparam_sol' = List.map (Pair.map_fst (Id.of_string -$- Ty.int)) @@ snd solution in
       let exparam_sol'' = List.map (fun (x,n) -> x, List.assoc_default n x exparam_sol') exparam_sol in
       if !Flag.Termination.add_closure_exparam
       then Debug.printf "SOLUTION: %a@." (List.print @@ Pair.print Print.id Format.pp_print_int) exparam_sol'';
@@ -313,7 +315,7 @@ let rec main_loop rank_var rank_funs prev_vars arg_vars exparam_sol spcs spcWith
 let pr ?(check_typ=Some Ty.unit) s t =
   if !!Debug.check then
     begin
-      Format.printf "##[%a] %a:@.%a@.@." Color.s_yellow "Fair_termination" Color.s_red s Print.term_typ t;
+      Format.fprintf !Flag.Print.target "##[%a] %a:@.%a@.@." Color.s_yellow "Fair_termination" Color.s_red s Print.term_typ t;
       Option.iter (fun ty -> Type_check.check t ~ty) check_typ
     end
 
@@ -322,7 +324,7 @@ let rec run spec t =
   Verbose.printf "FAIRNESS: %a@.@." print_fairness fairness;
   let t' =
     t
-    |> Trans.copy_poly_funs
+    |> Trans.copy_poly_values
     |> fst
     |@> pr "copy poly. funs."
     |> remove_and_replace_event
@@ -340,8 +342,8 @@ let rec run spec t =
     |@> pr ~check_typ:None "to_tfuns"
   in
   let main,_ = List.last @@ get_last_definition t' in
-  Debug.printf "MAIN: %a@." Id.print main;
-  let top_funs = List.filter_out (Id.same main) @@ get_top_funs t' in
+  Debug.printf "MAIN: %a@." Lid.print main;
+  let top_funs = List.filter_out (Lid._LId |- Lid.eq main) @@ get_top_funs t' in
   let top_funs' = List.filter (is_fun_typ -| Id.typ) top_funs in
   Debug.printf "TOP_FUNS: %a@." Print.(list id_typ) top_funs';
   let verify f =
@@ -367,8 +369,8 @@ let rec run spec t =
     let result = main_loop rank_var rank_funs prev_vars arg_vars init_sol [] [] [] t''' in
     if !!Debug.check then
       if result
-      then Format.printf "%a is fair terminating.@.@." Id.print f
-      else Format.printf "%a is possibly non fair terminating.@.@." Id.print f;
+      then Format.fprintf !Flag.Print.target "%a is fair terminating.@.@." Id.print f
+      else Format.fprintf !Flag.Print.target "%a is possibly non fair terminating.@.@." Id.print f;
     result
   in
   try

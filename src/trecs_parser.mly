@@ -4,9 +4,9 @@ open Trecs_syntax
 let print_error_information () =
   let st = Parsing.symbol_start_pos () in
   let en = Parsing.symbol_end_pos () in
-  print_string ("File \"" ^ st.Lexing.pos_fname);
-  Format.printf "\", line %d" st.Lexing.pos_lnum;
-  Format.printf ", characters %d-%d:\n"
+  Format.eprintf {|File "%s", line %d, characters %d-%d:@.|}
+    st.Lexing.pos_fname
+    st.Lexing.pos_lnum
     (st.Lexing.pos_cnum - st.Lexing.pos_bol)
     (en.Lexing.pos_cnum - en.Lexing.pos_bol)
 

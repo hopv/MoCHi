@@ -1,28 +1,21 @@
 open BRA_types
 
-let rec default_val t = {Syntax.desc = default_val' t; Syntax.typ = t; attr=[]}
+let rec default_val t = Syntax.make (default_val' t) t
 and default_val' =
   let open Syntax in
   let open Type in function
     | TBase TUnit -> Const Unit
     | TBase TBool -> Const False
     | TBase TInt -> Const (Int 0)
-    | TBase (TPrim _) -> invalid_arg "default_val: not yet implemented syntax(TPrim)"
     | TFun ({Id.typ = t1}, t2) -> Fun (Id.new_var ~name:"_" t1, default_val t2)
     | TAttr(_, typ) -> default_val' typ
-    | TData _ -> invalid_arg "default_val: not yet implemented syntax(TData)"
-    | TApp _ -> invalid_arg "default_val: not yet implemented syntax(TApp)"
-    | TTuple _ -> invalid_arg "default_val: not yet implemented syntax(TTuple)"
-    | TVar(t,_) ->
+    | TVar(_,t,_) ->
       begin
         match !t with
         | None -> raise (Invalid_argument "default_val: not yet implemented syntax(TVar None)")
         | Some t' -> default_val' t'
       end
-    | TFuns _ -> invalid_arg "default_val: not yet implemented syntax(TFuns)"
-    | TRecord _ -> invalid_arg "default_val: not yet implemented syntax(TRecord)"
-    | TVariant _ -> invalid_arg "default_val: not yet implemented syntax(TVariant)"
-    | TModule _ -> invalid_arg "default_val: not yet implemented syntax(TModule)"
+    | ty -> Util.invalid_arg "default_val: not yet implemented syntax (%a)" Print.typ ty
 
 let state_transducer trans_prev_statevar trans_statevar trans_argvars state =
   {state with
@@ -53,7 +46,7 @@ let make_statevar_id function_name baseId = Id.new_var ~name:(make_statevar_name
 let make_statevar function_name baseId = build_var (make_statevar_name function_name baseId) baseId.Id.typ
 
 let build_record {id = {Id.name = f_name}; args = f_args} =
-  let open Type in
+  let module Ty = Type_util.Ty in
   let record =
     ref { update_flag    = build_var "update_flag" Ty.bool
 	; set_flag       = build_var ("set_flag_" ^ f_name) Ty.bool

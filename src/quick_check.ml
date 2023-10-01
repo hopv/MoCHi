@@ -9,7 +9,6 @@ let generate ty =
   | TUnit -> Term.unit
   | TBool -> Term.bool @@ Random.bool ()
   | TInt -> Term.int @@ int_of_float @@ Random.gaussian 256.
-  | TPrim s -> unsupported ("TPrim " ^ s)
 
 let check ?limit t =
   let gen () = int_of_float @@ Random.gaussian 256. in

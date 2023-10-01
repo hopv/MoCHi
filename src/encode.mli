@@ -7,7 +7,10 @@ val mutable_record : Problem.t -> Problem.t
 val record : Problem.t -> Problem.t
 
 (** Encode simple variant as integer *)
-val simple_variant : Problem.t -> Problem.t
+val enum_variant : Problem.t -> Problem.t
+
+(** Encode simple variant as integer *)
+val nonrec_variant : Problem.t -> Problem.t
 
 (** Encode list as function *)
 val list : Problem.t -> Problem.t * ((Syntax.id -> Ref_type.t) -> Syntax.id -> Ref_type.t)
@@ -21,8 +24,14 @@ val array : Problem.t -> Problem.t
 (** Abstract away content of reference *)
 val abst_ref : Problem.t -> Problem.t
 
+(** Abstract away content of objects *)
+val abst_obj : Problem.t -> Problem.t
+
 (** Encode option types as pairs *)
 val option : Problem.t -> Problem.t
+
+(** Encode lazy as function *)
+val lazy_ : Problem.t -> Problem.t
 
 val all : Problem.t -> Problem.t
 
@@ -36,4 +45,8 @@ val ignore_data_arg : term -> term
 
 val ignore_exn_arg : term -> term
 
+val ignore_rec_exn_arg : term -> term
+
 val ignore_exn_fun_arg : term -> term
+
+val ignore_mutual_data_arg : term -> term

@@ -3,7 +3,7 @@ type program = {
   fun_typ_env : Ref_type.env;
   fun_typ_neg_env : Ref_type.neg_env;
   fun_def_env : (Syntax.id * Syntax.term) list;
-  exn_decl : (string * Syntax.typ list) list;
+  exn_decl : Syntax.term Type.row list;
 }
 
 type label = int
@@ -25,3 +25,4 @@ val normalize : bool -> Syntax.term -> Syntax.term
 val used_by : Syntax.id -> program -> Syntax.id list
 val term_of_prog : program -> Syntax.term
 val take_funs_of_depth : (Syntax.id * Syntax.term) list -> Syntax.id -> int -> Syntax.id list
+val make_etyp : program -> Type.constr * Syntax.typ

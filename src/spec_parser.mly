@@ -2,6 +2,7 @@
 open Util
 open Type
 open Syntax
+open Type_util
 open Term_util
 
 module RT = Ref_type
@@ -19,13 +20,13 @@ let print_error_information () =
 
 let parse_error _ = print_error_information ()
 
-let make_tmp_id s = Id.make 0 s [] typ_unknown
-let make_id_typ s typ = Id.make 0 s [] typ
+let make_tmp_id s = Id.make s typ_unknown
+let make_id_typ s typ = Id.make s typ
 let make_self_id typ = Id.new_var ~name:"_" typ
-let orig_id x = {x with Id.id = 0}
+let orig_id x = Id.set_id x 0
 
 let ref_base b = Ref_type.Base(b, Id.new_var (TBase(b)), true_term)
-let ref_ADT s = Ref_type.ADT(s, Id.new_var (TData(s)), true_term)
+let ref_constr s tys = Ref_type.Constr(s, tys, Id.new_var (TConstr(s,[])), true_term)
 let ref_list typ = RT.List(Id.new_var Ty.int, true_term, Id.new_var Ty.int, true_term, typ)
 let ref_fun x ty1 ty2 =
   let ty2' = RT.subst_var (orig_id x) (Id.set_typ x @@ elim_tattr @@ RT.to_simple ty1) ty2 in
@@ -44,12 +45,11 @@ let ref_tuple xtys =
 let normalize_ref ty =
   RT.map_pred Trans.set_length_typ ty
 
-let make_pat p = { pat_typ=typ_unknown; pat_desc=p }
+let make_pat p =
+  make_pattern p typ_unknown
 let make_var_pat (x: Syntax.id) = make_pat @@ PVar(x)
 let make_match x cases =
-  {desc=Match(make_var x, cases);
-   typ=typ_unknown;
-   attr=[]}
+  make (Match(make_var x, cases)) typ_unknown
 
 let var_of_ref_type ty =
   match ty with
@@ -112,16 +112,13 @@ let var_of_ref_type ty =
 %token EOF
 
 /* priority : low -> high */
-%left UNION
 %right ARROW
-%left INTER
 %left OR
 %left AND
 %nonassoc NOT
-%nonassoc EQUAL LTHAN GTHAN LEQ GEQ
+%nonassoc NEQ EQUAL LTHAN GTHAN LEQ GEQ
 %left PLUS MINUS
 %left TIMES DIV
-%left LIST
 
 
 
@@ -131,185 +128,166 @@ let var_of_ref_type ty =
 %%
 
 exp:
-  id
-  { make_var $1 }
-| LPAREN full_exp RPAREN
-  { $2 }
-| INT
-  { make_int $1 }
+| x=id
+  { Term.var x }
+| LPAREN e=full_exp RPAREN
+  { e }
+| n=INT
+  { Term.int n }
 | TRUE
-  { true_term }
+  { Term.true_ }
 | FALSE
-  { false_term }
-| MINUS exp
-  { make_sub (make_int 0) $2 }
-| exp EQUAL exp
-  { make_eq $1 $3 }
-| exp LTHAN exp
-  { make_lt $1 $3 }
-| exp GTHAN exp
-  { make_gt $1 $3 }
-| exp LEQ exp
-  { make_leq $1 $3 }
-| exp GEQ exp
-  { make_geq $1 $3 }
-| exp NEQ exp
-  { make_neq $1 $3 }
-| exp AND exp
-  { make_and $1 $3 }
-| exp OR exp
-  { make_or $1 $3 }
-| exp PLUS exp
-  { make_add $1 $3 }
-| exp MINUS exp
-  { make_sub $1 $3 }
-| exp TIMES exp
-  { make_mul $1 $3 }
-| exp DIV exp
-  { make_div $1 $3 }
-| NOT exp
-  { make_not $2 }
-| id id /* for length */
+  { Term.false_ }
+| MINUS e=exp
+  { Term.(~- e) }
+| e1=exp EQUAL e2=exp
+  { Term.(e1 = e2) }
+| e1=exp LTHAN e2=exp
+  { Term.(e1 < e2) }
+| e1=exp GTHAN e2=exp
+  { Term.(e1 > e2) }
+| e1=exp LEQ e2=exp
+  { Term.(e1 <= e2) }
+| e1=exp GEQ e2=exp
+  { Term.(e1 >= e2) }
+| e1=exp NEQ e2=exp
+  { Term.(e1 <> e2) }
+| e1=exp AND e2=exp
+  { Term.(e1 && e2) }
+| e1=exp OR e2=exp
+  { Term.(e1 || e2) }
+| e1=exp PLUS e2=exp
+  { Term.(e1 + e2) }
+| e1=exp MINUS e2=exp
+  { Term.(e1 - e2) }
+| e1=exp TIMES e2=exp
+  { Term.(e1 * e2) }
+| e1=exp DIV e2=exp
+  { Term.(e1 / e2) }
+| NOT e=exp
+  { Term.(not e) }
+| len=id x=id /* for length */
   {
-    if (Id.name $1 <> "List.length") then raise Parsing.Parse_error;
-    Term.(length (var $2))
+    if (Id.name len <> "List.length") then raise Parsing.Parse_error;
+    Term.(length (var x))
   }
 
 full_exp:
-| exp { $1 }
-| MATCH id WITH opt_bar match_cases
-  { make_match $2 $5 }
-
-match_cases:
-| match_case                 { [$1] }
-| match_case BAR match_cases { $1::$3 }
+| e=exp { e }
+| MATCH x=id WITH option(BAR) pats=separated_nonempty_list(BAR, match_case)
+  { make_match x pats }
 
 /* do not support `when` for the time being */
 match_case:
-| pattern ARROW exp { (make_pat $1, $3) }
+| p=pattern ARROW e=exp { (make_pat p, e) }
 
 pattern:
-| UNDER_SCORE                         { PAny }
-| id                                  { PVar($1) }
-| UIDENT                              { PConstr($1, []) }
-| UIDENT id                           { PConstr($1, [make_var_pat $2]) }
-| UIDENT LPAREN pat_simple_seq RPAREN { PConstr($1, $3) }
-
-pat_simple_seq:
-| pat_simple                      { [$1] }
-| pat_simple COMMA pat_simple_seq { $1::$3 }
+| UNDER_SCORE                                                         { PAny }
+| x=id                                                                { PVar(x) }
+| c=UIDENT                                                            { PConstr(false, LId (constr_of_string c), []) }
+| c=UIDENT x=id                                                       { PConstr(false, LId (constr_of_string c), [make_var_pat x]) }
+| c=UIDENT LPAREN ps=separated_nonempty_list(COMMA,pat_simple) RPAREN { PConstr(false, LId (constr_of_string c), ps) }
 
 pat_simple:
-| id          { make_var_pat $1 }
+| x=id        { make_var_pat x }
 | UNDER_SCORE { make_pat PAny }
 
-opt_bar:
-| {()}
-| BAR {()}
-
 id:
-| LIDENT { make_tmp_id $1 }
+| x=LIDENT { make_tmp_id x }
 
 spec:
-  spec_list EOF { $1 }
+  sp=spec_list EOF { sp }
 
 spec_list:
   { Spec.init }
-| assert_ref_type spec_list
-  { {$2 with Spec.assertion = $1::$2.Spec.assertion} }
-| ref_type spec_list
-  { {$2 with Spec.ref_env = $1::$2.Spec.ref_env} }
-| ext_ref_type spec_list
-  { {$2 with Spec.ext_ref_env = $1::$2.Spec.ext_ref_env} }
-| typedef spec_list
-  { {$2 with Spec.abst_env = $1::$2.Spec.abst_env} }
-| typedef_cps spec_list
-  { {$2 with Spec.abst_cps_env = $1::$2.Spec.abst_cps_env} }
-| typedef_cegar spec_list
-  { {$2 with Spec.abst_cegar_env = $1::$2.Spec.abst_cegar_env} }
-| inline spec_list
-  { {$2 with Spec.inlined = $1::$2.Spec.inlined} }
-| inlinef spec_list
-  { {$2 with Spec.inlined_f = $1::$2.Spec.inlined_f} }
-| fairness spec_list
-  { {$2 with Spec.fairness = $1::$2.Spec.fairness} }
+| s=assert_ref_type sp=spec_list
+  { {sp with Spec.assertion = s::sp.Spec.assertion} }
+| s=ref_type sp=spec_list
+  { {sp with Spec.ref_env = s::sp.Spec.ref_env} }
+| s=ext_ref_type sp=spec_list
+  { {sp with Spec.ext_ref_env = s::sp.Spec.ext_ref_env} }
+| s=typedef sp=spec_list
+  { {sp with Spec.abst_env = s::sp.Spec.abst_env} }
+| s=typedef_cps sp=spec_list
+  { {sp with Spec.abst_cps_env = s::sp.Spec.abst_cps_env} }
+| s=typedef_cegar sp=spec_list
+  { {sp with Spec.abst_cegar_env = s::sp.Spec.abst_cegar_env} }
+| s=inline sp=spec_list
+  { {sp with Spec.inlined = s::sp.Spec.inlined} }
+| s=inlinef sp=spec_list
+  { {sp with Spec.inlined_f = s::sp.Spec.inlined_f} }
+| s=fairness sp=spec_list
+  { {sp with Spec.fairness = s::sp.Spec.fairness} }
 
 assert_ref_type:
-| ASSERT id COLON ref_typ
-  { $2, normalize_ref $4 }
+| ASSERT x=id COLON ty=ref_typ
+  { x, normalize_ref ty }
 
 ref_type:
-| TYPE id COLON ref_typ
-  { $2, normalize_ref $4 }
+| TYPE x=id COLON ty=ref_typ
+  { x, normalize_ref ty }
 
 ext_ref_type:
-| EXTERNAL id COLON ref_typ
-  { $2, None, normalize_ref $4 }
-| EXTERNAL id AT STRING COLON ref_typ
-  { $2, Some $4, normalize_ref $6 }
+| EXTERNAL x=id COLON ty=ref_typ
+  { x, None, normalize_ref ty }
+| EXTERNAL x=id AT s=STRING COLON ty=ref_typ
+  { x, Some s, normalize_ref ty }
 
 typedef:
-| VAL id COLON typ
-  { $2, Id.typ $4 }
+| VAL x=id COLON ty=typ
+  { x, Id.typ ty }
 
 typedef_cps:
-| VALCPS id COLON typ
-  { $2, Id.typ $4 }
+| VALCPS x=id COLON ty=typ
+  { x, Id.typ ty }
 
 typedef_cegar:
-| VALCEGAR id COLON typ
-  { $2, Id.typ $4 }
+| VALCEGAR x=id COLON ty=typ
+  { x, Id.typ ty }
 
 fairness:
-| FAIRNESS COLON LPAREN EVENT COMMA EVENT RPAREN
-  { $4, $6 }
+| FAIRNESS COLON LPAREN e1=EVENT COMMA e2=EVENT RPAREN
+  { e1, e2 }
 
 inline:
-| INLINE id
-  { $2 }
+| INLINE x=id
+  { x }
 
 inlinef:
-| INLINEF id
-  { $2 }
+| INLINEF x=id
+  { x }
 
 simple_type_core:
 | TUNIT { Ty.unit }
 | TRESULT { typ_result }
 | TBOOL { Ty.bool }
 | TINT { Ty.int }
-| LPAREN typ LIST RPAREN { make_tlist @@ Id.typ $2 }
+| ty=simple_type_core LIST RPAREN { make_tlist ty }
 
 id_simple_type:
-| simple_type_core { make_self_id $1 }
-| simple_type_core LSQUAR pred_list RSQUAR { make_self_id (TAttr([TAPred(make_self_id $1, $3)], $1)) }
-| id COLON simple_type_core { Id.new_var ~name:(Id.name $1) $3 }
-| id COLON simple_type_core LSQUAR pred_list RSQUAR
+| ty=simple_type_core { make_self_id ty }
+| ty=simple_type_core LSQUAR ps=pred_list RSQUAR { make_self_id (TAttr([TAPred(make_self_id ty, ps)], ty)) }
+| x=id COLON ty=simple_type_core { Id.new_var ~name:(Id.name x) ty }
+| x=id COLON ty=simple_type_core LSQUAR ps=pred_list RSQUAR
   {
-    let x = $1 in
-    let typ = $3 in
-    let ps = $5 in
-    let x' = Id.new_var ~name:(Id.name x) typ in
-    let ps' = List.map (subst_var x @@ Id.set_typ x' @@ elim_tattr typ) ps in
-    Id.new_var ~name:(Id.name x) (TAttr([TAPred(x', ps')], typ))
+    let x' = Id.new_var ~name:(Id.name x) ty in
+    let ps' = List.map (subst_var x @@ Id.set_typ x' @@ elim_tattr ty) ps in
+    Id.new_var ~name:(Id.name x) (TAttr([TAPred(x', ps')], ty))
   }
 
 typ:
-| LPAREN typ RPAREN { $2 }
-| id_simple_type { $1 }
-| typ TIMES typ
+| LPAREN ty=typ RPAREN { ty }
+| ty=id_simple_type { ty }
+| x=typ TIMES r=typ
   {
-    let x = $1 in
-    let r = $3 in
     let typ1 = Id.typ x in
     let typ2 = Id.typ r in
     let typ2' = subst_type_var (orig_id x) (Id.set_typ x (elim_tattr typ1)) typ2 in
     let typ2'' = subst_type_var r (Id.set_typ abst_var (elim_tattr typ2)) typ2' in
     make_self_id @@ TTuple [x; Id.new_var typ2'']
   }
-| typ ARROW typ
+| x=typ ARROW r=typ
   {
-    let x = $1 in
-    let r = $3 in
     let typ1 = Id.typ x in
     let typ2 =
       Id.typ r
@@ -318,131 +296,117 @@ typ:
     in
     make_self_id @@ TFun(x, typ2)
   }
-| typ LIST
-  { make_self_id @@ make_tlist @@ Id.typ $1 }
 
 ref_base:
 | TUNIT { TUnit }
 | TBOOL { TBool }
 | TINT  { TInt }
 
-ref_ADT:
-| LIDENT { $1 }
+ref_constr:
+| x=LIDENT { x }
 
 ref_simple:
-| ref_base { ref_base $1 }
-| LBRACE id COLON ref_base BAR full_exp RBRACE
+| b=ref_base { ref_base b }
+| LBRACE v=id COLON b=ref_base BAR e=full_exp RBRACE
   {
-    let x = Id.set_typ $2 (TBase $4) in
-    RT.Base($4, x, subst_var $2 x $6)
+    let x = Id.set_typ v (TBase b) in
+    RT.Base(b, x, subst_var v x e)
   }
-| ref_ADT { ref_ADT $1 }
-| LBRACE id COLON ref_ADT BAR full_exp RBRACE
+| s=ref_constr { ref_constr (LId (constr_of_string s)) [] }
+| LBRACE v=id COLON s=ref_constr BAR e=full_exp RBRACE
   {
-    let x = Id.set_typ $2 (TData $4) in
-    RT.ADT($4, x, subst_var $2 x $6)
+    let x = Id.set_typ v (TConstr(LId (constr_of_string s),[])) in
+    RT.Constr(LId (constr_of_string s), [], x, subst_var v x e)
   }
-| LBRACE id COLON ref_simple LIST BAR full_exp RBRACE
+| LBRACE xs=id COLON ty=ref_simple LIST BAR e=full_exp RBRACE
   {
-    let xs = $2 in
     let len = Id.new_var Ty.int in
-    let p = subst_rev Term.(length (var xs)) len $7 in
-    assert (not (Id.mem xs @@ get_fv p));
-    RT.List(len, p, Id.new_var Ty.int, true_term, $4)
+    let p = subst_rev Term.(length (var xs)) len e in
+    assert (not (Id.List.mem xs @@ get_fv p));
+    RT.List(len, p, Id.new_var Ty.int, true_term, ty)
   }
-| LPAREN ref_typ RPAREN { $2 }
-| ref_simple LIST { RT.List(Id.new_var Ty.int,true_term,Id.new_var Ty.int,true_term,$1) }
+| LPAREN ty=ref_typ RPAREN { ty }
+| ty=ref_simple LIST { RT.List(Id.new_var Ty.int, true_term, Id.new_var Ty.int, true_term, ty) }
 /*
-| ref_simple length_ref LIST
+| ty=ref_simple xp=length_ref LIST
   {
-    let typ = $1 in
-    let x,p_len = $2 in
-    let typ' = RT.subst_var (orig_id x) x typ in
-    RT.List(x,p_len,Id.new_var Ty.int,true_term,typ')
+    let x, p_len = xp in
+    let ty' = RT.subst_var (orig_id x) x tp in
+    RT.List(x, p_len, Id.new_var Ty.int, true_term, ty')
   }
-| index_ref ref_simple length_ref LIST
+| yp=index_ref ty=ref_simple xp=length_ref LIST
   {
-    let y,p_i = $1 in
-    let typ = $2 in
-    let x,p_len = $3 in
-    let typ' = RT.subst_var (orig_id x) x typ in
+    let y,p_i = yp in
+    let x,p_len = xp in
+    let ty' = RT.subst_var (orig_id x) x ty in
     let p_i' = subst_var (orig_id x) x p_i in
-    RT.List(x,p_len,y,p_i',typ')
+    RT.List(x,p_len,y,p_i',ty')
   }
 
 
 index_ref:
-| LSQUAR id RSQUAR { Id.new_var ~name:(Id.name $2) Ty.int, true_term }
-| LSQUAR id COLON exp RSQUAR
+| LSQUAR x=id RSQUAR { Id.new_var ~name:(Id.name x) Ty.int, true_term }
+| LSQUAR x=id COLON e=exp RSQUAR
   {
-    let x = $2 in
     let x' = Id.new_var ~name:(Id.name x) Ty.int in
-    x', subst_var x x' $4
+    x', subst_var x x' e
   }
 
 length_ref:
-| BAR id BAR
+| BAR x=id BAR
   {
-    let x = $2 in
     let x' = Id.new_var ~name:(Id.name x) Ty.int in
     x', true_term
   }
-| BAR id COLON exp BAR
+| BAR x=id COLON e=exp BAR
   {
-    let x = $2 in
     let x' = Id.new_var ~name:(Id.name x) Ty.int in
-    x', subst_var x x' $4
+    x', subst_var x x' e
   }
 */
 tuple_ref_typ:
-| ref_typ TIMES ref_typ
+| ty1=ref_simple TIMES ty2=ref_simple
   {
-    [var_of_ref_type $1, $1; var_of_ref_type $3, $3]
+    [var_of_ref_type ty1, ty1; var_of_ref_type ty2, ty2]
   }
-| tuple_ref_typ TIMES ref_typ
-  { $1 @ [var_of_ref_type $3, $3] }
+| tys=tuple_ref_typ TIMES ty=ref_simple
+  { tys @ [var_of_ref_type ty, ty] }
 
 ref_typ:
-| ref_simple { $1 }
-| id COLON ref_simple TIMES ref_typ
+| ty=ref_simple { ty }
+| x=id COLON ty1=ref_simple TIMES ty2=ref_typ
   {
-    let y = Id.new_var (Ref_type.to_simple $5) in
-    ref_tuple [($1,$3);(y,$5)]
+    let y = Id.new_var (Ref_type.to_simple ty2) in
+    ref_tuple [(x,ty1);(y,ty2)]
   }
-| LPAREN id COLON ref_simple RPAREN TIMES ref_typ
+| LPAREN x=id COLON ty1=ref_simple RPAREN TIMES ty2=ref_typ
   {
-    let y = Id.new_var (Ref_type.to_simple $7) in
-    ref_tuple [($2,$4);(y,$7)]
+    let y = Id.new_var (Ref_type.to_simple ty2) in
+    ref_tuple [(x,ty1);(y,ty2)]
   }
-| tuple_ref_typ
-  { RT.Tuple $1 }
-| id COLON ref_simple ARROW ref_typ
+| tys=tuple_ref_typ
+  { RT.Tuple tys }
+| x=id COLON ty1=ref_simple ARROW ty2=ref_typ
   {
-    let x = Id.set_typ $1 (Ref_type.to_simple $3)
-    in ref_fun x $3 $5
+    let x' = Id.set_typ x (Ref_type.to_simple ty1) in
+    ref_fun x' ty1 ty2
   }
-| LPAREN id COLON ref_simple RPAREN ARROW ref_typ
+| LPAREN x=id COLON ty1=ref_simple RPAREN ARROW ty2=ref_typ
   {
-    let x = Id.set_typ $2 (Ref_type.to_simple $4)
-    in ref_fun x $4 $7
+    let x' = Id.set_typ x (Ref_type.to_simple ty1) in
+    ref_fun x' ty1 ty2
   }
-| ref_typ ARROW ref_typ
+| ty1=ref_typ ARROW ty2=ref_typ
   {
     let x  =
-      match $1 with
+      match ty1 with
       | RT.Base(_,y,_) -> y
-      | _ -> Id.new_var @@ RT.to_simple $1
+      | _ -> Id.new_var @@ RT.to_simple ty1
     in
-    ref_fun x $1 $3
+    ref_fun x ty1 ty2
   }
-| ref_typ UNION ref_typ { RT.Union(RT.to_simple $1, [$1; $3]) }
-| ref_typ INTER ref_typ { RT.Inter(RT.to_simple $1, [$1; $3]) }
-| ref_typ LIST { RT.App("list", $1) }
-| ref_typ LIDENT { RT.App($2, $1) }
+| ty=ref_simple UNION tys=separated_nonempty_list(UNION,ref_simple) { RT.Union(RT.to_simple ty, ty::tys) }
+| ty=ref_simple INTER tys=separated_nonempty_list(INTER,ref_simple) { RT.Inter(RT.to_simple ty, ty::tys) }
 
 pred_list:
-  { [] }
-| exp
-  { [$1] }
-| exp SEMI pred_list
-  { $1::$3 }
+| ps=separated_list(SEMI, exp) { ps }

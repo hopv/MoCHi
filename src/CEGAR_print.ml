@@ -172,12 +172,15 @@ and print_term fm = function
       Format.fprintf fm "@[<hov 1>(fun %a@ ->@ %a)@]" (print_list print_arg_var " ") env print_term t'
 
 and print_fun_def fm {fn=f;args=xs;cond=t1;body=t2} =
-  if t1 = Const True
-  then
-    let ys,t2 = decomp_fun t2 in
-    Format.fprintf fm "@[<hov 4>%a ->@ @[%a@].@]" (print_list print_var " ") (f::xs@ys) print_term t2
+  if t1 <> Const True then
+    Format.fprintf fm "@[<hov 4>@[<hov 2>%a %a when %a@] ->@ @[%a@].@]" print_var f (print_list print_var " ") (xs) print_term t1 print_term t2
   else
-    Format.fprintf fm "@[<hov 4>%a when %a ->@ @[%a@].@]" (print_list print_var " ") (f::xs) print_term t1 print_term t2
+    let ys,t2 = decomp_fun t2 in
+     if xs@ys = [] then
+       Format.fprintf fm "@[<hov 4>%a ->@ @[%a@].@]" print_var f print_term t2
+     else
+       let ys,t2 = decomp_fun t2 in
+       Format.fprintf fm "@[<hov 4>@[<hov 2>%a %a@] ->@ @[%a@].@]" print_var f (print_list print_var " ") (xs@ys) print_term t2
 
 and print_attr fm = function
   | ACPS -> Format.fprintf fm "ACPS"

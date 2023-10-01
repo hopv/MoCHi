@@ -16,7 +16,7 @@ let solve_file filename =
     | Z3_spacer -> !z3_spacer
   in
   let sol = Filename.change_extension filename "sol" in
-  let cmd' = Format.sprintf "(ulimit -t %d; %s %s > %s)" !Flag.Refine.solver_timelimit cmd filename sol in
+  let cmd' = Format.sprintf "(ulimit -t %d; %s %s > %s)" !Flag.Refine.solver_timelimit (Option.get cmd) filename sol in
   let r = Sys.command cmd' in
   if r = 128+9 then raise TimeOut;
   let s = IO.input_file sol in
@@ -32,6 +32,8 @@ let preprocess_rec_hccs ?(for_debug=false) hcs =
       x
       |> (if for_debug then Fun.id else F.Idnt.reset_uid)
       |> Format.asprintf "|%a|" F.Idnt.pr
+      |> String.map (function '|' -> '!' | c -> c)
+      |> Format.asprintf "|%s|"
       |> F.Idnt.make
     in
     F.HCCS.tenv hcs
@@ -46,7 +48,7 @@ let preprocess_rec_hccs ?(for_debug=false) hcs =
       let ext = if !!Debug.check then string_of_int !Flag.Log.cegar_loop ^ "." ^ ext else ext in
       ext
     in
-    Filename.change_extension !!Flag.Input.main ext in
+    Filename.change_extension !!Flag.IO.temp ext in
   hcs
   |> F.HCCS.rename map
   |@> Debug.printf "HCCS: %a@." F.HCCS.pr

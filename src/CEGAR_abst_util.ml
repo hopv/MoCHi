@@ -138,9 +138,7 @@ let rec is_base_term env t =
   | Var x ->
       (try
           is_base @@ List.assoc x env
-        with Not_found ->
-          Format.eprintf "%s not found@." x;
-          assert false)
+        with Not_found -> failwith "%s not found@." x)
   | App(App(Const (And|Or|Lt|Gt|Leq|Geq|EqUnit|EqInt|EqBool|CmpPoly _|Add|Sub|Mul|Div),t1),t2) ->
       assert (is_base_term env t1);
       assert (is_base_term env t2);

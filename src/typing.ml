@@ -191,7 +191,7 @@ let rec infer_term fun_arg_env env = function
       TFun(typ_x,typ1)
 
 let infer_def fun_arg_env env {fn=f; args=xs; cond=t1; body=t2} =
-  if false then Format.printf "%a@." CEGAR_print.var f;
+  if false then Format.fprintf !Flag.Print.target "%a@." CEGAR_print.var f;
   let typs = List.map (fun _ -> new_tvar()) xs in
   let env' = List.combine xs typs @ env in
   let typ1 = infer_term fun_arg_env env' t1 in

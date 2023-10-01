@@ -150,9 +150,9 @@ let rec make_arg_let t =
         let f = Id.new_var ~name:"f__" (t.S.typ) in
         let xts = List.map (fun t -> Id.new_var (t.S.typ), t) ts in
         let t' =
-          {S.desc = S.App(U.make_var f, List.map (fun (x,_) -> U.make_var x) xts);
-           S.typ = Type.typ_unknown;
-           S.attr = []}
+          let desc = S.App(U.make_var f, List.map (fun (x,_) -> U.make_var x) xts) in
+          let typ = Type_util.Ty.unknown in
+          S.make desc typ
         in
         (List.fold_left (fun t2 (x,t1) -> U.make_let [x,t1] t2) t' ((f,t)::xts)).S.desc
     | S.If(t1, t2, t3) ->
@@ -173,7 +173,7 @@ let rec make_arg_let t =
     | S.Event _ -> assert false
     | _ -> assert false
   in
-  {t with S.desc}
+  S.make desc t.typ
 
 
 
@@ -530,7 +530,7 @@ let assoc_fun_def defs f =
   match defs' with
   | [] -> assert false
   | [{args=xs; cond=Const True; body=t}] -> make_fun xs t
-  | [_] -> raise (Fatal "Not implemented: CEGAR_abst_CPS.assoc_fun_def")
+  | [_] -> failwith "Not implemented: CEGAR_abst_CPS.assoc_fun_def"
   | [{args=xs1;cond=t11;body=t12}; {args=xs2;cond=t21;body=t22}] when make_not t11 = t21 ->
       assert (xs1 = xs2);
       make_fun xs1 (make_if t11 t12 t22)
@@ -605,7 +605,7 @@ let eval_step_by_step  prog =
     let defs' = List.filter (fun {fn=g} -> f = g) defs in
     match defs' with
     | [{args=xs; cond=Const True; body=t}] -> make_fun xs t
-    | [_] -> raise (Fatal "Not implemented: CEGAR_abst_CPS.assoc_fun_def")
+    | [_] -> failwith "Not implemented: CEGAR_abst_CPS.assoc_fun_def"
     | [{args=xs1;cond=t11;body=t12}; {args=xs2;cond=t21;body=t22}] when make_not t11 = t21 ->
         assert (xs1 = xs2);
         make_fun xs1 (make_if t11 t12 t22)
@@ -617,13 +617,13 @@ let eval_step_by_step  prog =
   in
   let counter = ref 0 in
   let rec get_tf l_then l_else =
-    Format.printf "[%d] t/f?" !counter;
-    if Option.is_some l_then then Format.printf " (t -> %d?, " @@ Option.get l_then;
-    if Option.is_some l_else then Format.printf "f -> %d?)" @@ Option.get l_else;
-    Format.printf ": @?";
+    Format.fprintf !Flag.Print.target "[%d] t/f?" !counter;
+    if Option.is_some l_then then Format.fprintf !Flag.Print.target " (t -> %d?, " @@ Option.get l_then;
+    if Option.is_some l_else then Format.fprintf !Flag.Print.target "f -> %d?)" @@ Option.get l_else;
+    Format.fprintf !Flag.Print.target ": @?";
     match read_line () with
-    | "t" -> Format.printf "t@."; true
-    | "f" -> Format.printf "f@."; false
+    | "t" -> Format.fprintf !Flag.Print.target "t@."; true
+    | "f" -> Format.fprintf !Flag.Print.target "f@."; false
     | _ -> get_tf l_then l_else
   in
   let rec eval_cond t t_then t_else =
@@ -638,8 +638,8 @@ let eval_step_by_step  prog =
     | _ -> assert false
   in
   let rec eval t =
-    if true then Color.printf Color.Red "EVAL:@.";
-    if true then Format.printf "%a@." CEGAR_print.term t;
+    if true then Color.printf Red "EVAL:@.";
+    if true then Format.fprintf !Flag.Print.target "%a@." CEGAR_print.term t;
 (*    ignore @@ read_line ();*)
     match decomp_app t with
     | Const If, [t1;t2;t3] ->
@@ -647,21 +647,21 @@ let eval_step_by_step  prog =
         then eval t2
         else eval t3
     | Const (Label n), [t] ->
-        Color.printf Color.Green "Label %d@." n;
+        Color.printf Green "Label %d@." n;
         if false then ignore @@ read_line ();
         eval t
     | Fun(x,_,t1), t2::ts ->
-        if true then Color.printf Color.Blue "[%s |-> %a]@." x CEGAR_print.term t2;
+        if true then Color.printf Blue "[%s |-> %a]@." x CEGAR_print.term t2;
         eval @@ make_app (subst x t2 t1) ts
     | Var f, ts ->
         let subst' x t1 t2 =
-          if true then Color.printf Color.Blue "[%s |-> %a]@." x CEGAR_print.term t1;
+          if true then Color.printf Blue "[%s |-> %a]@." x CEGAR_print.term t1;
           subst x t1 t2
         in
         let xs,t' = decomp_fun @@ assoc_fun_def prog.defs f in
         eval @@ List.fold_right2 subst' xs ts t'
     | _ ->
-        Color.printf Color.Blue "%a@." CEGAR_print.term t;
+        Color.printf Blue "%a@." CEGAR_print.term t;
         assert false
   in
   let t_main = assoc_fun_def prog.defs prog.main in

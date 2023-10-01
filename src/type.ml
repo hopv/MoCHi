@@ -1,35 +1,53 @@
 open Util
 
-module Debug_attr = Debug.Make(struct let check = Flag.Debug.make_check (__MODULE__ ^ ".attr") end)
-module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
-
 type base =
   | TUnit
   | TBool
   | TInt
-  | TPrim of string
 
-and 'a id = 'a t Id.t
+and 'a tid = 'a t Id.t
+and tconstr = unit Id.t (* for type constructors *)
+and label = unit Id.t (* for record types *)
+and constr = unit Id.t (* for variant types *)
+and path =
+  | LId of unit Id.t
+  | LDot of path * string (* string must be normalized by [Id.normalize_name] *)
+  | LApp of path * path
 
 and 'a t =
   | TBase of base
-  | TVar of 'a t option ref * int
-  | TFun of 'a id * 'a t
-  | TFuns of 'a id list * 'a t (* Just for fair-termination. TODO: Refactor *)
-  | TTuple of 'a id list
-  | TData of string
-  | TVariant of bool * (string * 'a t list) list (** true means polymorphic variant *)
-  | TRecord of (string * (mutable_flag * 'a t)) list
-  | TApp of string * 'a t list
+  | TVar of bool * 'a t option ref * int (* Boolean denotes weakness, The third argument (counter) is used just for printing *)
+  | TFun of 'a tid * 'a t
+  | TFuns of 'a tid list * 'a t (* Just for fair-termination. TODO: Refactor *)
+  | TTuple of 'a tid list
+  | TVariant of variant_kind * 'a row list (** true means polymorphic variant *)
+  | TRecord of (label * (mutable_flag * 'a t)) list
+  | TConstr of path * 'a t list
   | TAttr of 'a attr list * 'a t
-  | TModule of 'a signature
+  | TModSig of 'a signature
+  | TModLid of path (* Only for external modules/functors; see #2 of memo.md *)
+  | TPackage of 'a t
+  | TPoly of 'a t option ref list * 'a t
+  | TConstraint of 'a t * ('a t * 'a t) list (* the left in an list element must be TVar *)
+  | TOpen (* extensible variant type *)
 
+and variant_kind =
+  | VNonPoly
+  | VPoly of
+      {closed : bool;
+       tvar : unit option; (* TODO *)
+       lower : constr list option } (* TODO *)
+
+and 'a row =
+  {row_constr : constr;
+   row_args : 'a t list;
+   row_ret : 'a t option}
 and mutable_flag = Immutable | Mutable
 
 and 'a attr =
-  | TAPred of 'a id * 'a list (* TAPred occur at most ones *)
+  | TAPred of 'a tid * 'a list (* TAPred occur at most ones *)
   | TAPredShare of int
-  | TARefPred of 'a id * 'a (* TARefPred occur at most ones *)
+  | TARefPred of 'a tid * 'a (* TARefPred occur at most ones *)
   | TAPureFun
   | TAEffect of effect list
   | TAId of string * int
@@ -38,27 +56,43 @@ and 'a attr =
 and effect = EVar of int | EEvent | ENonDet | EDiv | EExcep
 
 and 'a signature =
-  {sig_types: 'a declaration;
-   sig_values: 'a id list}
+  {sig_types: 'a declaration list;
+   sig_ext: 'a ext list;
+   sig_values: 'a tid list}
 
-and 'a declaration = (string * 'a t) list
-  [@@deriving show]
+and 'a declaration = 'a decl_item list
+and 'a decl_item = (tconstr * ('a params * 'a t))
 
-exception CannotUnify
+and 'a ext = path * ('a params * 'a ext_row)
+and 'a ext_row =
+  {ext_row_path : path; (* I have forgotten why we use path here instead of tconstr *)
+   ext_row_args : 'a t list;
+   ext_row_ret : 'a t option}
 
-let counter = ref 0
-let new_tvar () =
-  let ty = TVar(ref None, !counter) in
-  incr counter;
-  ty
+and 'a params = 'a t list
 
-let label_pred_share = "pred_share" (* for TAId *)
+and 'a extension =
+  | Ext_type of 'a ext          (** [type t += ...] *)
+  | Ext_rebind of constr * path (** [exception A = B] *) (* TODO: type t += A = B *)
+[@@deriving show {with_path = false}]
 
-let print_as_ocaml = ref false
-let set_print_as_ocaml () = print_as_ocaml := true
-let tmp_set_print_as_ocaml f = Ref.tmp_set print_as_ocaml true f
+let _LId c = LId (Id.set_typ c ())
+let _LDot path s = LDot(path, s)
+let _LApp path1 path2 = LApp(path1, path2)
 
+let _TBase b = TBase b
+let _TVar b r n = TVar(b, r, n)
 let _TFun x ty = TFun(x, ty)
+let _TFuns xs ty = TFuns(xs, ty)
+let _TTuple xs = TTuple xs
+let _TVariant b labels = TVariant(b, labels)
+let _TRecord fields = TRecord fields
+let _TConstr c tys = TConstr(c, tys)
+let _TConstraint ty cs =
+  if cs = [] then
+    ty
+  else
+    TConstraint(ty, cs)
 let _TAttr attr ty =
   if attr = [] then
     ty
@@ -66,759 +100,885 @@ let _TAttr attr ty =
     match ty with
     | TAttr(attr', ty') -> TAttr(List.Set.(attr + attr'), ty')
     | _ -> TAttr(attr, ty)
+let _TModSig sgn = TModSig sgn
+let _TModLid sgn = TModLid sgn
+let _TPackage ty = TPackage ty
+let _TPoly vars ty = TPoly(vars, ty)
 
-let typ_unknown = TData "???"
+let _Ext_type ext = Ext_type ext
+let _Ext_rebind c p = Ext_rebind(c, p)
 
-let rec var_name_of typ =
-  match typ with
-  | TBase TUnit -> "u"
-  | TBase TBool -> "b"
-  | TBase TInt -> "n"
-  | TFun _ -> "f"
-  | TTuple _ -> "p"
-  | TApp("list",_) -> "xs"
-  | TAttr(_,ty) -> var_name_of ty
-  | _ -> "x"
-
-let new_var ?name typ =
-  let name =
-    match name with
-    | None -> (var_name_of typ)
-    | Some name -> name
-  in
-  Id.new_var ~name typ
-
-let pureTFun(x,typ) = TAttr([TAPureFun], TFun(x,typ))
-let raiseTFun(exn,x,typ) = TAttr([TARaise exn], TFun(x,typ))
-
-let make_tfun ?name typ1 typ2 = TFun(new_var ?name typ1, typ2)
-let make_ptfun ?name typ1 typ2 = TAttr([TAPureFun], make_tfun ?name typ1 typ2)
-let make_tfun_raise ?name typ1 ~typ_exn typ2 = TAttr([TARaise typ_exn], make_tfun ?name typ1 typ2)
-let make_ttuple typs = TTuple (List.map new_var typs)
-let make_tpair typ1 typ2 = make_ttuple [typ1; typ2]
-let make_tlist typ = TApp("list", [typ])
-let make_tset typ = TApp("set", [typ])
-let make_tref typ = TApp("ref", [typ])
-let make_toption typ = TApp("option", [typ])
-let make_tarray typ = TApp("array", [typ])
-let make_tconstr s typ = TApp(s, [typ])
-
-let make_trans f =
-  let rec trans ty =
-    match f trans ty with
-    | None ->
-        begin match ty with
-        | TBase b -> TBase b
-        | TVar({contents=Some ty},_) -> trans ty
-        | TVar(r,id) -> TVar(r,id)
-        | TFun(x,ty) -> TFun(Id.map_typ trans x, trans ty)
-        | TApp(c,tys) -> TApp(c, List.map trans tys)
-        | TTuple xs -> TTuple (List.map (Id.map_typ trans) xs)
-        | TData s -> TData s
-        | TAttr(attr,ty) -> TAttr(attr, trans ty)
-        | TFuns(xs,ty) -> TFuns(List.map (Id.map_typ trans) xs, trans ty)
-        | TVariant(poly,labels) -> TVariant(poly, List.map (Pair.map_snd (List.map trans)) labels)
-        | TRecord fields -> TRecord (List.map (Pair.map_snd (Pair.map_snd trans)) fields)
-        | TModule {sig_types; sig_values} ->
-            let sig_types = List.map (Pair.map_snd trans) sig_types in
-            TModule {sig_types; sig_values}
-        end
-    | Some ty -> ty
-  in
-  trans
+let row_constr {row_constr;_} = row_constr
+let row_args {row_args;_} = row_args
+let row_ret {row_ret;_} = row_ret
 
 let rec elim_tattr = function
   | TAttr(_,typ) -> elim_tattr typ
   | typ -> typ
 
-let is_fun_typ typ =
-  match elim_tattr typ with
-  | TFun(_,_) -> true
-  | TFuns(_,_) -> true
-  | _ -> false
+let types_of_format = ["CamlinternalFormatBasics.format6"; "Stdlib.format4"; "Stdlib.format6"]
 
-let rec is_base_typ = function
-  | TBase _
-  | TData "string" -> true
-  | TAttr(_,typ) -> is_base_typ typ
-  | _ -> false
+module Val = struct
+  let _LId        = function LId x             -> Some x          | _ -> None
+  let _TBase      = function TBase b           -> Some b          | _ -> None
+  let _TVar       = function TVar(b, r, n)     -> Some (b, r, n)  | _ -> None
+  let _TFun       = function TFun(x,ty)        -> Some (x, ty)    | _ -> None
+  let _TFuns      = function TFuns(xs,ty)      -> Some (xs, ty)   | _ -> None
+  let _TTuple     = function TTuple xs         -> Some xs         | _ -> None
+  let _TVariant   = function TVariant(b, rows) -> Some (b, rows)  | _ -> None
+  let _TRecord    = function TRecord fields    -> Some fields     | _ -> None
+  let _TConstr    = function TConstr(c, tys)   -> Some (c, tys)   | _ -> None
+  let _TAttr      = function TAttr(attr, ty)   -> Some (attr, ty) | _ -> None
+  let _TModSig    = function TModSig sgn       -> Some sgn        | _ -> None
+  let _TModLid    = function TModLid m         -> Some m          | _ -> None
+  let _TPackage   = function TPackage ty       -> Some ty         | _ -> None
+  let _TPoly      = function TPoly(r,ty)       -> Some (r, ty)    | _ -> None
+  let _Ext_type   = function Ext_type ext      -> Some ext        | _ -> None
+  let _Ext_rebind = function Ext_rebind(c,p)   -> Some (c, p)     | _ -> None
+end
 
-let is_tuple_typ ty =
-  match elim_tattr ty with
-  | TTuple _ -> true
-  | _ -> false
+module ValE = struct
+  let _LId        = function LId x             -> x        | _ -> [%invalid_arg]
+  let _TBase      = function TBase b           -> b        | _ -> [%invalid_arg]
+  let _TVar       = function TVar(b, r, n)     -> b, r, n  | _ -> [%invalid_arg]
+  let _TFun       = function TFun(x,ty)        -> x, ty    | _ -> [%invalid_arg]
+  let _TFuns      = function TFuns(xs,ty)      -> xs, ty   | _ -> [%invalid_arg]
+  let _TTuple     = function TTuple xs         -> xs       | _ -> [%invalid_arg]
+  let _TVariant   = function TVariant(b, rows) -> b, rows  | _ -> [%invalid_arg]
+  let _TRecord    = function TRecord fields    -> fields   | _ -> [%invalid_arg]
+  let _TConstr    = function TConstr(c, tys)   -> c, tys   | _ -> [%invalid_arg]
+  let _TAttr      = function TAttr(attr, ty)   -> attr, ty | _ -> [%invalid_arg]
+  let _TModSig    = function TModSig sgn       -> sgn      | _ -> [%invalid_arg]
+  let _TModLid    = function TModLid m         -> m        | _ -> [%invalid_arg]
+  let _TPackage   = function TPackage ty       -> ty       | _ -> [%invalid_arg]
+  let _TPoly      = function TPoly(r,ty)       -> r, ty    | _ -> [%invalid_arg]
+  let _Ext_type   = function Ext_type ext      -> ext      | _ -> [%invalid_arg]
+  let _Ext_rebind = function Ext_rebind(c,p)   -> c, p     | _ -> [%invalid_arg]
+end
 
-let tfuns_to_tfun = function
-  | TFuns(xs,typ) -> List.fold_right _TFun xs typ
-  | typ -> typ
+module Is = struct
+  let _LId        = function LId _        -> true | _ -> false
+  let _TBase      = function TBase _      -> true | _ -> false
+  let _TVar       = function TVar _       -> true | _ -> false
+  let _TFun       = function TFun _       -> true | _ -> false
+  let _TFuns      = function TFuns _      -> true | _ -> false
+  let _TTuple     = function TTuple _     -> true | _ -> false
+  let _TVariant   = function TVariant _   -> true | _ -> false
+  let _TRecord    = function TRecord _    -> true | _ -> false
+  let _TConstr    = function TConstr _    -> true | _ -> false
+  let _TAttr      = function TAttr _      -> true | _ -> false
+  let _TModSig    = function TModSig _    -> true | _ -> false
+  let _TModLid    = function TModLid _    -> true | _ -> false
+  let _TPackage   = function TPackage _   -> true | _ -> false
+  let _TPoly      = function TPoly _      -> true | _ -> false
+  let _Ext_type   = function Ext_type _   -> true | _ -> false
+  let _Ext_rebind = function Ext_rebind _ -> true | _ -> false
 
-let elim_tattr_all =
-  let aux tr ty =
-    match ty with
-    | TAttr(_,typ) -> Some (tr typ)
-    | _ -> None
-  in
-  fun ty -> make_trans aux ty
+  let poly_variant = function TVariant(VPoly _, _) -> true | _ -> false
+end
 
-let decomp_base ty =
-  match elim_tattr ty with
-  | TBase b -> Some b
-  | _ -> None
+module Val' = struct
+  let _TBase x    = elim_tattr x |> Val._TBase
+  let _TVar x     = elim_tattr x |> Val._TVar
+  let _TFun x     = elim_tattr x |> Val._TFun
+  let _TFuns x    = elim_tattr x |> Val._TFuns
+  let _TTuple x   = elim_tattr x |> Val._TTuple
+  let _TVariant x = elim_tattr x |> Val._TVariant
+  let _TRecord x  = elim_tattr x |> Val._TRecord
+  let _TConstr x  = elim_tattr x |> Val._TConstr
+  let _TAttr x    = elim_tattr x |> Val._TAttr
+  let _TModSig x  = elim_tattr x |> Val._TModSig
+  let _TModLid x  = elim_tattr x |> Val._TModLid
+  let _TPackage x = elim_tattr x |> Val._TPackage
+  let _TPoly x    = elim_tattr x |> Val._TPoly
+end
 
-let rec decomp_tfun typ =
-  match elim_tattr typ with
-  | TFun(x,typ) ->
-      let xs,typ = decomp_tfun typ in
-      x :: xs, typ
-  | _ -> [], typ
+module ValE' = struct
+  let _TBase x    = elim_tattr x |> ValE._TBase
+  let _TVar x     = elim_tattr x |> ValE._TVar
+  let _TFun x     = elim_tattr x |> ValE._TFun
+  let _TFuns x    = elim_tattr x |> ValE._TFuns
+  let _TTuple x   = elim_tattr x |> ValE._TTuple
+  let _TVariant x = elim_tattr x |> ValE._TVariant
+  let _TRecord x  = elim_tattr x |> ValE._TRecord
+  let _TConstr x  = elim_tattr x |> ValE._TConstr
+  let _TAttr x    = elim_tattr x |> ValE._TAttr
+  let _TModSig x  = elim_tattr x |> ValE._TModSig
+  let _TModLid x  = elim_tattr x |> ValE._TModLid
+  let _TPackage x = elim_tattr x |> ValE._TPackage
+  let _TPoly x    = elim_tattr x |> ValE._TPoly
+end
 
-let decomp_tfuns = function
-  | TFuns(xs, typ) -> xs, typ
-  | _ -> invalid_arg "decomp_tfuns"
+module Is' = struct
+  let _TBase x    = elim_tattr x |> Is._TBase
+  let _TVar x     = elim_tattr x |> Is._TVar
+  let _TFun x     = elim_tattr x |> Is._TFun
+  let _TFuns x    = elim_tattr x |> Is._TFuns
+  let _TTuple x   = elim_tattr x |> Is._TTuple
+  let _TVariant x = elim_tattr x |> Is._TVariant
+  let _TRecord x  = elim_tattr x |> Is._TRecord
+  let _TConstr x  = elim_tattr x |> Is._TConstr
+  let _TAttr x    = elim_tattr x |> Is._TAttr
+  let _TModSig x  = elim_tattr x |> Is._TModSig
+  let _TModLid x  = elim_tattr x |> Is._TModLid
+  let _TPackage x = elim_tattr x |> Is._TPackage
+  let _TPoly x    = elim_tattr x |> Is._TPoly
 
-let arity typ = List.length @@ fst @@ decomp_tfun typ
+  let poly_variant x = elim_tattr x |> Is.poly_variant
+end
 
-let decomp_effect = function
-  | TAttr(attrs, typ) ->
-      let attrs1,attrs2 = List.partition (function TAEffect _ -> true | _ -> false) attrs in
-      let typ' =
-        if attrs2 = [] then
-          typ
-        else
-          TAttr(attrs2, typ)
-      in
-      begin
-        match attrs1 with
-        | [] -> None
-        | [TAEffect e] -> Some (e, typ')
-        | _ -> invalid_arg "decomp_effect"
-      end
-  | _ -> None
+let empty_signature = {sig_types=[]; sig_ext=[]; sig_values=[]}
 
-let decomp_raise_tfun ty =
+let counter = ref 0
+let new_tvar_aux b =
+  let ty = TVar(b, ref None, !counter) in
+  incr counter;
+  ty
+let new_tvar () = new_tvar_aux false
+let new_tvar_weak () = new_tvar_aux true
+
+let copy_tvar ty =
   match ty with
-  | TAttr(attrs, TFun(x, ty2)) ->
-      List.find_map_opt (function TARaise exn -> Some exn | _ -> None) attrs
-      |> Option.map (fun exn -> exn, x, ty2)
-  | _ -> None
-let is_raise_tfun ty = Option.is_some (decomp_raise_tfun ty)
+  | TVar(true, {contents=None}, _) -> ty
+  | TVar(false, {contents=None}, n) -> TVar(false, ref None, n)
+  | _ -> invalid_arg "Type.copy_tvar"
 
-let print_effect fm e =
-  match e with
-  | EVar n -> Format.fprintf fm "'e%d" n
-  | EEvent -> Format.fprintf fm "event"
-  | EDiv -> Format.fprintf fm "div"
-  | ENonDet -> Format.fprintf fm "nondet"
-  | EExcep -> Format.fprintf fm "excep"
-
-let rec print_attr fm a =
-  match a with
-  | TAPred _ -> Format.fprintf fm "TAPred"
-  | TARefPred _ -> Format.fprintf fm "TARefPred"
-  | TAPureFun -> Format.fprintf fm "TAPureFun"
-  | TAEffect e -> Format.fprintf fm "TAEffect %a" (List.print print_effect) e
-  | TAPredShare x -> Format.fprintf fm "TAPredShare %d" x
-  | TAId(s,x) -> Format.fprintf fm "TAId(%s,%d)" s x
-  | TARaise ty -> Format.fprintf fm "TARaise %a" (print (fun _ _ -> true) (fun _ ->  assert false)) ty
-
-and print_tvar fm n =
-  if n < 0 then
-    Format.fprintf fm "'_for_debug"
-  else
-    let c = char_of_int @@ int_of_char 'a' + n mod 26 in
-    let d = if n < 26 then "" else string_of_int (n/26) in
-    Format.fprintf fm "'%c%s" c d
-
-and print_base fm b =
-  match b with
-  | TUnit -> Format.fprintf fm "unit"
-  | TBool -> Format.fprintf fm "bool"
-  | TInt -> Format.fprintf fm "int"
-  | TPrim s -> Format.fprintf fm "TPrim %s" s
-
-and print_signature occur print_pred fm {sig_types; sig_values} =
-  if !Flag.Print.signature then
-    let pr = print occur print_pred in
-    let pr_tys last =
-      let pr_ty fm (s,ty) = Format.fprintf fm "@[<hov 2>type %s = %a@]" s pr ty in
-      print_list pr_ty ~last "@\n"
-    in
-    let pr_vals =
-      let pr_val fm x = Format.fprintf fm "@[<hov 2>val %a : %a@]" Id.print x pr (Id.typ x) in
-      print_list pr_val "@\n"
-    in
-    let last = sig_types <> [] && sig_values <> [] in
-    Format.fprintf fm "(@[sig@[<hv -1>@ %a%a@]@ end@])" (pr_tys last) sig_types pr_vals sig_values
-  else
-    Format.fprintf fm "sig ... end"
-
-and print occur print_pred fm typ =
-  let print' = print occur print_pred in
-  let print_preds ps = print_list print_pred "; " ps in
-  match typ with
-  | TBase TUnit -> Format.fprintf fm "unit"
-  | TBase TBool -> Format.fprintf fm "bool"
-  | TBase TInt -> Format.fprintf fm "int"
-  | TBase (TPrim s) -> Format.fprintf fm "%s" s
-  | TVar({contents=Some typ},_) -> print' fm typ
-  | TVar({contents=None}, n) -> print_tvar fm n
-  | TFun _ ->
-      let rec aux fm (xs, typ) =
-        match xs with
-        | [] ->
-            print' fm typ
-        | x::xs' ->
-            if List.exists (occur x) (typ :: List.map Id.typ xs)
-            then Format.fprintf fm "@[<hov 2>%a:%a ->@ %a@]" Id.print x print' (Id.typ x) aux (xs',typ)
-            else Format.fprintf fm "@[<hov 2>%a ->@ %a@]" print' (Id.typ x) aux (xs',typ)
-      in
-      Format.fprintf fm "(%a)" aux @@ decomp_tfun typ
-  | TFuns(xs,typ) ->
-      let rec aux fm (xs, typ) =
-        match xs with
-        | [] -> Format.fprintf fm "[%a]" print' typ
-        | x::xs' ->
-            if List.exists (occur x) (typ :: List.map Id.typ xs)
-            then Format.fprintf fm "@[<hov 2>%a:%a ->@ %a@]" Id.print x print' (Id.typ x) aux (xs',typ)
-            else Format.fprintf fm "@[<hov 2>%a ->@ %a@]" print' (Id.typ x) aux (xs',typ)
-      in
-      Format.fprintf fm "(%a)" aux (xs, typ)
-  | TTuple [] -> (* TODO: fix *)
-      Format.fprintf fm "unit"
-  | TTuple xs ->
-      let pr fm x =
-        if occur x typ then Format.fprintf fm "%a:" Id.print x;
-        print' fm @@ Id.typ x
-      in
-      Format.fprintf fm "(@[<hov 2>%a@])" (print_list pr "@ *@ ") xs
-  | TData s when !Flag.Print.tdata -> Format.fprintf fm "TData %s" s
-  | TData s -> Format.fprintf fm "%s" s
-  | TAttr(_, ty) when !print_as_ocaml -> print' fm ty
-  | TAttr([], typ) -> print' fm typ
-  | TAttr(TAPred(x,ps)::preds, typ) when not !!Debug_attr.check ->
-      Format.fprintf fm "@[%a@[<hov 3>[\\%a. %a]@]@]" print' (TAttr(preds,typ)) Id.print x print_preds ps
-  | TAttr([TAPureFun], (TFun(x,typ))) when not !!Debug_attr.check ->
-      let pr_arg fm x = if occur x typ then Format.fprintf fm "%a:" Id.print x in
-      Format.fprintf fm "(@[<hov 2>%a%a -*>@ %a@])" pr_arg x print' (Id.typ x) print' typ
-  | TAttr(TAPureFun::attrs, ty) when not !!Debug_attr.check ->
-      print' fm (TAttr(attrs@[TAPureFun],ty))
-  | TAttr(TAEffect e::attrs, typ) when not !!Debug_attr.check ->
-      let ty = TAttr(attrs,typ) in
-      Format.fprintf fm "(@[%a # %a@])" print' ty (List.print print_effect) e
-  | TAttr(TARefPred(x,p)::attrs, ty) ->
-      let ty' = TAttr(attrs,ty) in
-      Format.fprintf fm "@[{%a:%a|%a}@]" Id.print x print' ty' print_pred p
-  | TAttr(TAId(_,x)::attrs, ty) when not !!Debug_attr.check ->
-      let ty' = TAttr(attrs,ty) in
-      let s1,s2 =
-        match ty with
-        | TFun _ -> "(", ")"
-        | _ -> "", ""
-      in
-      Format.fprintf fm "@[%s%a%s^%d@]" s1 print' ty' s2 x
-  | TAttr(attrs, ty) -> Format.fprintf fm "(%a @@ %a)" print' ty (List.print print_attr) attrs
-  | TVariant(poly,labels) ->
-      let pr fm (s, typs) =
-        let s' = if poly then "`" ^ s else s in
-        if typs = [] then
-          Format.fprintf fm "%s" s'
-        else
-          Format.fprintf fm "@[%s of %a@]" s' (print_list print' "@ *@ ") typs
-      in
-      Format.fprintf fm "(@[%a@])" (print_list pr "@ | ") labels
-  | TRecord fields ->
-      let pr fm (s, (f, typ)) =
-        let sf = if f = Mutable then "mutable " else "" in
-        Format.fprintf fm "@[%s%s: %a@]" sf s print' typ
-      in
-      Format.fprintf fm "{@[%a@]}" (print_list pr ";@ ") fields
-  | TModule sgn -> Format.fprintf fm "@[%a@]" (print_signature occur print_pred) sgn
-  | TApp("ref", [typ]) -> Format.fprintf fm "@[%a ref@]" print' typ
-  | TApp("list", [typ]) -> Format.fprintf fm "@[%a list@]" print' typ
-  | TApp("option", [typ]) -> Format.fprintf fm "@[%a option@]" print' typ
-  | TApp("array", [typ]) -> Format.fprintf fm "@[%a array@]" print' typ
-  | TApp("lazy", [typ]) -> Format.fprintf fm "@[%a Lazy.t@]" print' typ
-  | TApp("set", [typ]) -> Format.fprintf fm "@[%a set@]" print' typ
-  | TApp _ -> assert false
-
-let print ?(occur=fun _ _ -> false) print_pred fm typ =
-  Format.fprintf fm "@[%a@]" (print occur print_pred) typ
-let print_init typ = print (fun _ -> assert false) typ
-
-let decomp_module s =
-  List.decomp_snoc @@ String.split_on_char '.' s
-
-let base = snd -| decomp_module
-
-let rec flatten typ =
-  match typ with
-      TVar({contents = Some typ'},_) -> flatten typ'
-    | _ -> typ
-
-(* just for "unify"? *)
-let rec occurs r typ =
-  match flatten typ with
-  | TBase _ -> false
-  | TVar({contents=None} as r',_) -> r == r'
-  | TVar({contents=Some _},_) -> assert false
-  | TFun(x,typ) -> occurs r (Id.typ x) || occurs r typ
-  | TApp(_, typs) -> List.exists (occurs r) typs
-  | TTuple xs -> List.exists (occurs r -| Id.typ) xs
-  | TData _ -> false
-  | TAttr(_,typ) -> occurs r typ
-  | TFuns _ -> unsupported ""
-  | TVariant(_,labels) -> List.exists (snd |- List.exists @@ occurs r) labels
-  | TRecord fields -> List.exists (snd |- snd |- occurs r) fields
-  | TModule {sig_types} ->
-      List.exists (snd |- occurs r) sig_types
-
-let rec data_occurs s typ =
-  match flatten typ with
-  | TBase _ -> false
-  | TVar(r,_) -> Option.exists (data_occurs s) !r
-  | TFun(x,typ) -> data_occurs s (Id.typ x) || data_occurs s typ
-  | TApp(_, typs) -> List.exists (data_occurs s) typs
-  | TTuple xs -> List.exists (data_occurs s -| Id.typ) xs
-  | TData s' -> s = s'
-  | TAttr(_,typ) -> data_occurs s typ
-  | TFuns _ -> unsupported ""
-  | TVariant(_,labels) -> List.exists (snd |- List.exists @@ data_occurs s) labels
-  | TRecord fields -> List.exists (snd |- snd |- data_occurs s) fields
-  | TModule {sig_types} ->
-      List.exists (snd |- data_occurs s) sig_types
-
-
-let rec unify ?(for_check=false) ?tenv typ1 typ2 =
-  let print_error =
-    if not for_check then
-      Format.eprintf
-    else
-      Format.ifprintf Format.std_formatter
+let make_trans f =
+  let rec trans ty =
+    match f trans ty with
+    | None ->
+        let tr_row {row_constr; row_args; row_ret} =
+          let row_args = List.map trans row_args in
+          let row_ret = Option.map trans row_ret in
+          {row_constr; row_args; row_ret}
+        in
+        let tr_ext_row {ext_row_path; ext_row_args; ext_row_ret} =
+          let ext_row_args = List.map trans ext_row_args in
+          let ext_row_ret = Option.map trans ext_row_ret in
+          {ext_row_path; ext_row_args; ext_row_ret}
+        in
+        begin match ty with
+        | TBase b -> TBase b
+        | TVar(_,{contents=Some ty},_) -> trans ty
+        | TVar(b,r,id) -> TVar(b,r,id)
+        | TFun(x,ty) -> TFun(Id.map_typ trans x, trans ty)
+        | TConstr(c,tys) -> TConstr(c, List.map trans tys)
+        | TTuple xs -> TTuple (List.map (Id.map_typ trans) xs)
+        | TAttr(attr,ty) -> TAttr(attr, trans ty)
+        | TFuns(xs,ty) -> TFuns(List.map (Id.map_typ trans) xs, trans ty)
+        | TVariant(poly,rows) -> TVariant(poly, List.map tr_row rows)
+        | TRecord fields -> TRecord (Fmap.(list (snd (snd trans))) fields)
+        | TModSig {sig_types; sig_values; sig_ext} ->
+            let sig_values = List.map (Id.map_typ trans) sig_values in
+            let sig_types = Fmap.(list (list (snd (snd trans)))) sig_types in
+            let sig_ext = Fmap.(list (snd (snd tr_ext_row))) sig_ext in
+            TModSig {sig_types; sig_values; sig_ext}
+        | TModLid m -> TModLid m
+        | TPackage ty -> TPackage (trans ty)
+        | TPoly(vars,ty) -> TPoly(vars, trans ty)
+        | TConstraint(ty,cs) -> TConstraint(trans ty, Fmap.(list (trans * trans)) cs)
+        | TOpen -> TOpen
+        end
+    | Some ty -> ty
   in
-  let check_eq x y = if x <> y then raise CannotUnify in
-  match flatten @@ elim_tattr typ1, flatten @@ elim_tattr typ2 with
-  | TBase b1, TBase b2 -> check_eq b1 b2
-  | TFun(x1, typ1), TFun(x2, typ2) ->
-      unify ~for_check ?tenv (Id.typ x1) (Id.typ x2);
-      unify ~for_check ?tenv typ1 typ2
-  | TApp(c1,typs1), TApp(c2,typs2) ->
-      check_eq c1 c2;
-      List.iter2 (unify ~for_check ?tenv) typs1 typs2
-  | TTuple xs1, TTuple xs2 ->
-      check_eq (List.length xs1) (List.length xs2);
-      List.iter2 (fun x1 x2 -> unify ~for_check ?tenv (Id.typ x1) (Id.typ x2)) xs1 xs2
-  | TVar(r1,_), TVar(r2,_) when r1 == r2 -> ()
-  | TVar({contents = None} as r, n), typ
-  | typ, TVar({contents = None} as r, n) ->
-      if occurs r typ then
-        (print_error "occur-check failure: %a, %a@." print_init (flatten typ1) print_init (flatten typ2);
-         raise CannotUnify);
-      Debug.printf "UNIFY %a := %a@." print_tvar n print_init typ;
-      r := Some typ
-  | TVariant(true,_), TVariant(true,_) -> ()
-  | TVariant(false,labels1), TVariant(false,labels2) ->
-      check_eq (List.length labels1) (List.length labels2);
-      let check (s1,typs1) (s2,typs2) =
-          check_eq s1 s2;
-          check_eq (List.length typs1) (List.length typs2);
-          List.iter2 (unify ~for_check ?tenv) typs1 typs2
-      in
-      List.iter2 check labels1 labels2
-  | TRecord fields1, TRecord fields2 ->
-      check_eq (List.length fields1) (List.length fields2);
-      let check (s1,(f1,typ1)) (s2,(f2,typ2)) =
-          check_eq s1 s2;
-          check_eq f1 f2;
-          unify ~for_check ?tenv typ1 typ2
-      in
-      List.iter2 check fields1 fields2
-  | TModule sgn1, TModule sgn2 ->
-      check_eq (List.length sgn1.sig_types) (List.length sgn2.sig_types);
-      let check (s1,ty1) (s2,ty2) =
-        check_eq s1 s2;
-        unify ~for_check ?tenv ty1 ty2
-      in
-      List.iter2 check sgn1.sig_types sgn2.sig_types;
-      check_eq (List.length sgn1.sig_values) (List.length sgn2.sig_values);
-      let check x y = unify ~for_check ?tenv (Id.typ x) (Id.typ y) in
-      List.iter2 check sgn1.sig_values sgn2.sig_values
-  | _, TData _
-  | TData _, _ when tenv = None -> ()
-  | TData s1, TData s2 when s1 = s2 -> ()
-  | TData s, _ when Option.exists (List.mem_assoc s) tenv ->
-      unify ~for_check ?tenv (List.assoc s @@ Option.get tenv) typ2
-  | _, TData s when Option.exists (List.mem_assoc s) tenv ->
-      unify ~for_check ?tenv typ1 (List.assoc s @@ Option.get tenv)
-  | ty1, ty2 ->
-      print_error "unification error: %a, %a@." print_init ty1 print_init ty2;
-      raise CannotUnify
+  trans
 
-let rec eq ty1 ty2 =
-  let eq_id = Compare.eq_on Id.typ ~eq in
+let make_reduce ~f ~app:(++) ~default =
+  let rec reduce ty =
+    let reduce_var x = reduce @@ Id.typ x in
+    let reduce_list red xs = List.fold_left (fun acc x -> acc ++ red x) default xs in
+    match f reduce ty with
+    | None ->
+        begin match ty with
+        | TBase _ -> default
+        | TVar(_,{contents=Some ty},_) -> reduce ty
+        | TVar _ -> default
+        | TFun(x,ty) -> reduce_var x ++ reduce ty
+        | TConstr(_,tys) -> reduce_list reduce tys
+        | TTuple xs -> reduce_list reduce_var xs
+        | TAttr(_,ty) -> reduce ty
+        | TFuns(xs,ty) -> reduce_list reduce_var xs ++ reduce ty
+        | TVariant(_, rows) ->
+            let rd_row {row_constr=_; row_args; row_ret} =
+              reduce_list reduce row_args ++ Option.fold ~none:default ~some:reduce row_ret
+            in
+            reduce_list rd_row rows
+        | TRecord fields -> reduce_list (snd |- snd |- reduce) fields
+        | TModSig {sig_types; sig_values} ->
+            reduce_list (reduce_list (reduce -| snd -| snd)) sig_types
+            ++ reduce_list reduce_var sig_values
+        | TModLid _ -> default
+        | TPackage ty -> reduce ty
+        | TPoly(_, ty) -> reduce ty
+        | TConstraint(ty,cs) -> reduce ty ++ reduce_list (fun (p,ty) -> reduce p ++ reduce ty) cs
+        | TOpen -> default
+        end
+    | Some x -> x
+  in
+  reduce
+
+let make_find (type a) (f : (a t -> unit) -> a t -> bool) =
+  let exception Found of a t in
+  let rec find ty =
+    let find_var x = find @@ Id.typ x in
+    if f find ty then
+      raise (Found ty)
+    else
+      match ty with
+      | TBase _ -> ()
+      | TVar(_,{contents=Some ty},_) -> find ty
+      | TVar _ -> ()
+      | TFun(x,ty) -> find_var x; find ty
+      | TConstr(_,tys) -> List.iter find tys
+      | TTuple xs -> List.iter find_var xs
+      | TAttr(_,ty) -> find ty
+      | TFuns(xs,ty) -> List.iter find_var xs; find ty
+      | TVariant(_, rows) ->
+          let rd_row {row_constr=_; row_args; row_ret} =
+            List.iter find row_args;
+            Option.iter find row_ret
+          in
+          List.iter rd_row rows
+      | TRecord fields -> List.iter (snd |- snd |- find) fields
+      | TModSig {sig_types; sig_values} ->
+          List.iter (List.iter (find -| snd -| snd)) sig_types;
+          List.iter find_var sig_values
+      | TModLid _ -> ()
+      | TPackage ty -> find ty
+      | TPoly(_, ty) -> find ty
+      | TConstraint(ty, cs) ->
+          find ty;
+          List.iter (fun (p,ty) -> find p; find ty) cs
+      | TOpen -> ()
+  in
+  fun ty -> match find ty with () -> None | exception Found ty -> Some ty
+
+let make_fold f =
+  let rec fold acc ty =
+    let wrap c ~fld ~acc ty = Pair.map_snd c @@ fld ~acc ty in
+    let wrap_list c ~fld ~acc tys =
+      List.fold_right (fun ty (acc,tys) -> let acc,ty' = fld ~acc ty in acc,ty'::tys) tys (acc,[])
+      |> Pair.map_snd c
+    in
+    let wrap_pair c ~fld1 ~fld2 ~acc x y =
+      let acc,x' = fld1 ~acc x in
+      let acc,y' = fld2 ~acc y in
+      acc, c x' y'
+    in
+    let fld ~acc ty = fold acc ty in
+    let fld_option ~fld ~acc x =
+      match x with
+      | None -> acc, None
+      | Some y ->
+          let acc,y' = fld ~acc y in
+          acc, Some y'
+    in
+    let fld_var ~acc x = wrap (Id.set_typ x) ~fld ~acc @@ Id.typ x in
+    let fld_list ~fld ~acc xs = wrap_list Fun.id ~fld ~acc xs in
+    match f fold acc ty with
+    | None ->
+        begin match ty with
+        | TBase _ -> acc, ty
+        | TVar(_,{contents=Some ty},_) -> fold acc ty
+        | TVar(b,r,id) -> acc, TVar(b,r,id)
+        | TFun(x,ty) -> wrap_pair _TFun ~fld1:fld_var ~fld2:fld ~acc x ty
+        | TConstr(c,tys) -> wrap (_TConstr c) ~fld:(fld_list ~fld:fld) ~acc tys
+        | TTuple xs -> wrap _TTuple ~fld:(fld_list ~fld:fld_var) ~acc xs
+        | TAttr(attr,ty) -> wrap (_TAttr attr) ~fld ~acc ty
+        | TFuns(xs,ty) -> wrap_pair _TFuns ~fld1:(fld_list ~fld:fld_var) ~fld2:fld ~acc xs ty
+        | TVariant(poly,rows) ->
+            let fld_row ~acc {row_constr; row_args; row_ret} =
+              let acc,row_args = fld_list ~fld ~acc row_args in
+              let acc,row_ret = fld_option ~fld ~acc row_ret in
+              acc, {row_constr; row_args; row_ret}
+            in
+            let acc,rows = fld_list ~fld:fld_row ~acc rows in
+            acc, TVariant(poly, rows)
+        | TRecord fields ->
+            let fld_label ~acc (s,(flag,ty)) = wrap (Pair.pair s -| Pair.pair flag) ~fld ~acc ty in
+            wrap_list _TRecord ~fld:fld_label ~acc fields
+        | TModSig {sig_types; sig_values; sig_ext} ->
+            let acc,sig_types =
+              let fld_ty ~acc (s,(params,ty)) = wrap (Pair.pair s -| Pair.pair params) ~fld ~acc ty in
+              fld_list ~fld:(fld_list ~fld:fld_ty) ~acc sig_types
+            in
+            let acc,sig_ext =
+              fld_list ~acc sig_ext
+                ~fld:(fun ~acc (s, (params, {ext_row_path; ext_row_args; ext_row_ret})) ->
+                  let acc,ext_row_args = fld_list ~fld ~acc ext_row_args in
+                  let acc,ext_row_ret = fld_option ~fld ~acc ext_row_ret in
+                  acc, (s, (params, {ext_row_path; ext_row_args; ext_row_ret})))
+            in
+            let acc,sig_values = fld_list ~fld:fld_var ~acc sig_values in
+            acc, TModSig {sig_types; sig_values; sig_ext}
+        | TModLid _ -> acc, ty
+        | TPackage ty -> wrap _TPackage ~fld ~acc ty
+        | TPoly(vars, ty) -> wrap (_TPoly vars) ~fld ~acc ty
+        | TConstraint(ty, cs) ->
+            let acc,ty' = fld ~acc ty in
+            let acc,cs' =
+              fld_list ~acc cs
+                ~fld:(fun ~acc (p,ty) ->
+                  let acc,p' = fld ~acc p in
+                  let acc,ty' = fld ~acc ty in
+                  acc, (p', ty'))
+            in
+            acc, TConstraint(ty', cs')
+        | TOpen -> acc, ty
+        end
+    | Some (acc,ty) -> acc, ty
+  in
+  fold
+
+(** Checks syntactic equality not semantical equality (e.g., [int List.t] differs from [int list]) *)
+let rec equal ?(env=[]) ty1 ty2 =
+  let eq = equal ~env in
   match ty1, ty2 with
   | TBase b1, TBase b2 -> b1 = b2
-  | TVar(x,_), TVar(y,_) -> x == y
-  | TFun(x,ty1), TFun(y,ty2) -> eq_id x y && eq ty1 ty2
-  | TFuns _, TFuns _ -> assert false
-  | TTuple tys1, TTuple tys2 -> List.eq ~eq:eq_id tys1 tys2
-  | TData s1, TData s2 -> s1 = s2
-  | TVariant(b1,labels1), TVariant(b2,labels2) -> b1 = b2 && List.eq ~eq:(Pair.eq (=) (List.eq ~eq)) labels1 labels2
-  | TRecord fields1, TRecord fields2 -> List.eq ~eq:(Pair.eq (=) (Pair.eq (=) eq)) fields1 fields2
-  | TApp(c1,typs1), TApp(c2,typs2) -> c1 = c2 && List.eq ~eq typs1 typs2
-  | TAttr(attr1, ty1),  TAttr(attr2, ty2) -> attr1 = attr2 && ty1 = ty2
-  | TModule sgn1, TModule sgn2 ->
-      List.eq ~eq:(Pair.eq (=) eq) sgn1.sig_types sgn2.sig_types &&
-      List.eq ~eq:eq_id sgn1.sig_values sgn2.sig_values
+  | TVar(_, {contents = Some ty1}, _), _ -> eq ty1 ty2
+  | _, TVar(_, {contents = Some ty2}, _) -> eq ty1 ty2
+  | TVar(b1, r1, _), TVar(b2, r2, _) ->
+      b1 = b2 && (* TODO: need? *)
+      (r1 == r2 || List.exists (fun (r3,r4) -> r1 == r3 && r2 == r4 || r1 == r4 && r2 == r3) env)
+  | TFun(x1, ty1), TFun(x2, ty2) -> eq (Id.typ x1) (Id.typ x2) && eq ty1 ty2
+  | TFuns _, _
+  | _, TFuns _ -> [%unsupported]
+  | TTuple xs1, TTuple xs2 -> List.equal (Compare.eq_on ~eq Id.typ) xs1 xs2
+  | TVariant(vk1, rows1), TVariant(vk2, rows2) ->
+      let b1 =
+        match vk1, vk2 with
+        | VNonPoly, VNonPoly -> true
+        | VPoly {closed=b1}, VPoly {closed=b2} -> b1 = b2 (* TODO *)
+        | _ -> false
+      in
+      b1 && List.equal equal_row rows1 rows2
+  | TRecord fields1, TRecord fields2 -> List.equal (fun (l1,(f1,ty1)) (l2,(f2,ty2)) -> l1 = l2 && f1 = f2 && eq ty1 ty2) fields1 fields2
+  | TConstr(p1,tys1), TConstr(p2,tys2) -> equal_path p1 p2 && List.equal eq tys1 tys2
+  | TAttr(attrs1, ty1), TAttr(attrs2, ty2) -> attrs1 = attrs2 && eq ty1 ty2
+  | TModSig sgn1, TModSig sgn2 -> equal_signature ~env sgn1 sgn2
+  | TModLid m1, TModLid m2 -> equal_path m1 m2
+  | TPackage ty1, TPackage ty2 -> eq ty1 ty2
+  | TPoly(ps1, ty1), TPoly(ps2, ty2) -> equal ~env:(List.combine ps1 ps2 @@@ env) ty1 ty2
   | _ -> false
 
+and equal_row ?(env=[]) row1 row2 =
+  Id.eq row1.row_constr row2.row_constr &&
+  List.equal (equal ~env) row1.row_args row2.row_args &&
+  Option.equal (equal ~env) row1.row_ret row2.row_ret
 
-let rec is_instance_of ?(strict=false) ty1 ty2 =
-  let eq = is_instance_of ~strict in
-  let eq_id = Compare.eq_on Id.typ ~eq in
-  match elim_tattr ty1, elim_tattr ty2 with
-  | TVar({contents=None},_), TVar({contents=None},_) -> not strict
-  | TVar({contents=Some ty1},_), TVar({contents=None},_) -> eq ty1 ty2
-  | TBase b1, TBase b2 -> b1 = b2
-  | TVar(x,_), TVar(y,_) -> x == y
-  | TFun(x,ty1), TFun(y,ty2) -> eq_id x y && eq ty1 ty2
-  | TFuns _, TFuns _ -> assert false
-  | TTuple xs1, TTuple xs2 -> List.eq ~eq:eq_id xs1 xs2
-  | TData s1, TData s2 -> s1 = s2
-  | TVariant(b1,labels1), TVariant(b2,labels2) -> b1 = b2 && List.eq ~eq:(Pair.eq (=) (List.eq ~eq:is_instance_of)) labels1 labels2
-  | TRecord fields1, TRecord fields2 -> List.eq ~eq:(Pair.eq (=) (Pair.eq (=) eq)) fields1 fields2
-  | TApp(c1,typs1), TApp(c2,typs2) -> c1 = c2 && List.eq ~eq typs1 typs2
-  | TModule sgn1, TModule sgn2 ->
-      List.eq ~eq:(Pair.eq (=) eq) sgn1.sig_types sgn2.sig_types &&
-      List.eq ~eq:(Compare.eq_on Id.typ ~eq) sgn1.sig_values sgn2.sig_values
+and equal_signature ?(env=[]) sgn1 sgn2 =
+  let eq = equal ~env in
+  let eq_decl_item (c1,(ps1,ty1)) (c2,(ps2,ty2)) =
+    Id.eq c1 c2 && List.equal eq ps1 ps2 && eq ty1 ty2
+  in
+  List.equal (List.equal eq_decl_item) sgn1.sig_types sgn2.sig_types &&
+  List.equal (fun x y -> Id.eq x y && eq (Id.typ x) (Id.typ y)) sgn1.sig_values sgn2.sig_values &&
+  List.equal (=) sgn1.sig_ext sgn1.sig_ext (* TODO *)
+
+and equal_path ?(eq=Id.eq) lid1 lid2 =
+  match lid1, lid2 with
+  | LId id1, LId id2 -> eq id1 id2
+  | LDot(p1,s1), LDot(p2,s2) -> equal_path ~eq p1 p2 && s1 = s2
+  | LApp(p11,p12), LApp(p21,p22) -> equal_path ~eq p11 p21 && equal_path ~eq p12 p22
   | _ -> false
 
-
-let rec same_shape typ1 typ2 =
-  let eq_id = Compare.eq_on Id.typ ~eq:same_shape in
-  match elim_tattr typ1, elim_tattr typ2 with
-  | TBase b1, TBase b2 -> b1 = b2
-  | TVar({contents=None},_), TVar({contents=None},_) -> true
-  | TVar({contents=Some typ1},_),TVar({contents=Some typ2},_) -> same_shape typ1 typ2
-  | TFun(x1,typ1),TFun(x2,typ2) -> eq_id x1 x2 && same_shape typ1 typ2
-  | TApp(c1,typs1), TApp(c2,typs2) -> c1=c2 && List.for_all2 same_shape typs1 typs2
-  | TTuple xs1, TTuple xs2 -> List.eq ~eq:eq_id xs1 xs2
-  | TData s1, TData s2 -> s1 = s2
-  | TVariant(poly1,labels1), TVariant(poly2,labels2) ->
-      poly1 = poly2 &&
-      List.eq ~eq:(Pair.eq (=) (List.eq ~eq:same_shape)) labels1 labels2
-  | TRecord fields1, TRecord fields2 -> List.eq ~eq:(Pair.eq (=) (Pair.eq (=) same_shape)) fields1 fields2
-  | TModule sgn1, TModule sgn2 ->
-      List.eq ~eq:(Pair.eq (=) same_shape) sgn1.sig_types sgn2.sig_types &&
-      List.eq ~eq:eq_id sgn1.sig_values sgn2.sig_values
-  | _ -> false
+let eq x y = equal ~env:[] x y
 
 
 
 
-
-let rec app_typ typ typs =
-  match typ,typs with
-    | TFun(_,typ2), _::typs' -> app_typ typ2 typs'
-    | _, [] -> typ
-    | _ -> assert false
-
-let tuple_num typ =
-  match elim_tattr typ with
-  | TTuple xs -> Some (List.length xs)
-  | _ -> None
-
-let proj_typ i typ =
-  match elim_tattr typ with
-  | TTuple xs -> Id.typ @@ List.nth xs i
-  | typ when typ = typ_unknown -> typ_unknown
-  | typ' -> invalid_arg @@ Format.asprintf "proj_typ %d (%a)" i print_init typ'
-
-let fst_typ typ = proj_typ 0 typ
-let snd_typ typ = proj_typ 1 typ
-
-let ref_typ typ =
-  match elim_tattr typ with
-  | TApp("ref", [typ]) -> typ
-  | typ when typ = typ_unknown -> typ_unknown
-  | _ -> invalid_arg "ref_typ"
-
-let list_typ typ =
-  match elim_tattr typ with
-  | TApp("list", [typ]) -> typ
-  | typ when typ = typ_unknown -> typ_unknown
-  | _ -> invalid_arg "list_typ"
-
-let option_typ typ =
-  match elim_tattr typ with
-  | TApp("option", [typ]) -> typ
-  | typ when typ = typ_unknown -> typ_unknown
-  | _ -> invalid_arg "option_typ"
-
-let array_typ typ =
-  match elim_tattr typ with
-  | TApp("array", [typ]) -> typ
-  | typ when typ = typ_unknown -> typ_unknown
-  | _ -> invalid_arg "array_typ"
-
-let set_typ typ =
-  match elim_tattr typ with
-  | TApp("set", [typ]) -> typ
-  | typ when typ = typ_unknown -> typ_unknown
-  | _ -> invalid_arg "set_typ"
-
-let rec has_pred = function
-  | TBase _ -> false
-  | TVar({contents=None},_) -> false
-  | TVar({contents=Some typ},_) -> has_pred typ
-  | TFun(x,typ) -> has_pred (Id.typ x) || has_pred typ
-  | TApp(_,typs) -> List.exists has_pred typs
-  | TTuple xs -> List.exists (has_pred -| Id.typ) xs
-  | TData _ -> false
-  | TAttr(attr,typ) ->
-      has_pred typ || List.exists (function TAPred(_, _::_) -> true | _ -> false) attr
-  | TFuns _ -> unsupported ""
-  | TVariant(_,labels) -> List.exists (snd |- List.exists has_pred) labels
-  | TRecord fields -> List.exists (snd |- snd |- has_pred) fields
-  | TModule {sig_types} ->
-      List.exists (snd |- has_pred) sig_types
-
-let rec to_id_string = function
-  | TBase TUnit -> "unit"
-  | TBase TBool -> "bool"
-  | TBase TInt -> "int"
-  | TBase (TPrim s) -> s
-  | TVar({contents=None},_) -> "abst"
-  | TVar({contents=Some typ},_) -> to_id_string typ
-  | TFun(x,typ) -> to_id_string (Id.typ x) ^ "__" ^ to_id_string typ
-  | TApp(s, [typ]) -> to_id_string typ ^ s
-  | TTuple xs ->
-      let xs',x = List.decomp_snoc xs in
-      let aux x s = to_id_string (Id.typ x) ^ "_x_" ^ s in
-      List.fold_right aux xs' @@ to_id_string @@ Id.typ x
-  | TData s -> s
-  | TAttr(_,typ) -> to_id_string typ
-  | TApp _ -> assert false
-  | TFuns _ -> unsupported ""
-  | TVariant(_,labels) ->
-      labels
-      |> List.take 2
-      |> List.map fst
-      |> String.join "_"
-  | TRecord fields -> String.join "_" @@ List.map fst fields
-  | TModule _ -> "module"
-
-
-(* order of simpl types *)
-let rec order typ =
-  match typ with
-  | TBase _ -> 0
-  | TData _ -> 0
-  | TVar({contents=None},_) -> assert false
-  | TVar({contents=Some typ},_) -> order typ
-  | TFun(x,typ) -> max (order (Id.typ x) + 1) (order typ)
-  | TTuple xs -> List.fold_left (fun m x -> max m (order @@ Id.typ x)) 0 xs
-  | TAttr(_,typ) -> order typ
-  | _ -> assert false
-
-let arg_var typ =
-  match elim_tattr typ with
-  | TFun(x,_) -> x
-  | _ -> invalid_arg "arg_var"
-
-let result_typ typ =
-  match elim_tattr typ with
-  | TFun(_,typ') -> typ'
-  | _ -> invalid_arg "result_typ"
-
-let decomp_ttuple typ =
-  match elim_tattr typ with
-  | TTuple xs -> List.map Id.typ xs
-  | _ -> invalid_arg "decomp_ttuple"
-
-let decomp_trecord typ =
-  match elim_tattr typ with
-  | TRecord fields -> fields
-  | _ -> invalid_arg "decomp_trecord"
-
-let decomp_tvariant ty =
-  match elim_tattr ty with
-  | TVariant(poly,labels) ->
-      poly, labels
-  | _ -> invalid_arg "decomp_tvariant"
-
-let decomp_tmodule ty =
-  match ty with
-  | TModule sgn -> sgn
-  | _ -> invalid_arg "decomp_tmodule"
-
-let is_mutable_record typ =
-  match typ with
-  | TRecord fields ->
-      List.exists (fun (_,(f,_)) -> f = Mutable) fields
-  | _ -> invalid_arg "is_mutable_record"
-
-let prim_base_types =
-  ["char";
-   "string";
-   "float";
-   "int32";
-   "int64";
-   "nativeint";
-   "format4";
-   "format6";
-   "Format.format";
-   "Format.formatter"]
-
-let rec remove_arg_at i ty =
-  match ty with
-  | TFun(_, typ) when i = 0 -> typ
-  | TFun(x, typ) -> TFun(x, remove_arg_at (i-1) typ)
-  | _ -> assert false
-
-let decomp_tattr ty =
-  match ty with
-  | TAttr(attrs, ty') -> attrs, ty'
-  | _ -> [], ty
-
-let decomp_tdata ty =
-  match ty with
-  | TData s -> s
-  | _ -> invalid_arg "Type.decomp_tdata"
-
-let is_tvar ty =
-  match ty with
-  | TVar({contents=None},_) -> true
-  | _ -> false
-
-let add_tattr attr ty =
-  match ty with
-  | TAttr(attrs, ty') when not (List.mem attr attrs) -> TAttr(attr::attrs, ty')
-  | _ -> TAttr([attr], ty)
-
-let filter_map_attr f =
-  let aux tr ty =
+let copy_tvar_typ =
+  let fold fld env ty =
     match ty with
-    | TAttr(attr,typ) ->
-        let attr' = List.filter_map f attr in
-        Some (TAttr(attr', tr typ))
+    | TVar(false, ({contents=None} as r), _) ->
+        let env, ty =
+          match List.assq_opt r env with
+          | None ->
+              let ty = !!new_tvar in
+              (r, ty)::env, ty
+          | Some ty -> env, ty
+        in
+        Some (env, ty)
+    | TPoly(params, ty1) ->
+        let env,ty1' = fld env ty1 in
+        let params' =
+          params
+          |> List.map (fun r ->
+                 match List.assq r env with
+                 | TVar (_, r',_ ) -> r'
+                 | _
+                 | exception Not_found ->
+                     Format.eprintf "ty: %a@." (pp Fun.ignore2)  ty;
+                     assert false)
+        in
+        Some (env, TPoly(params', ty1'))
     | _ -> None
   in
-  fun ty -> make_trans aux ty
+  fun ?(env=[]) ty -> make_fold fold env ty
 
-let map_attr f ty = filter_map_attr (Option.some -| f) ty
+let ref_of_tvar typ =
+  match typ with
+  | TVar(_, r, _) -> r
+  | _ -> invalid_arg "Type.ref_of_tvar"
 
-let elim_tid l ty =
-  filter_map_attr (function TAId(l',_) when l = l' -> None | a -> Some a) ty
+let copy_tconstr_params (params,ty) =
+  let env = List.map (Pair.make ref_of_tvar copy_tvar) params in
+  let params' = List.map snd env in
+  let env',ty' = copy_tvar_typ ~env ty in (* (params,ty) is assumed to be closed??? *)
+  env', (params', ty')
 
-let rec types_in_signature {sig_types; sig_values} =
-  let types =
-    let aux x =
-      try
-        types_in_module ~add_prefix:true x
-      with Invalid_argument _ -> []
-    in
-    List.flatten_map aux sig_values
+let copy_tconstr_params_list params tys =
+  let dummy = TBase TUnit in
+  let env,(params',_) = copy_tconstr_params (params, dummy) in
+  let env',tys' =
+    List.L.fold_right ~init:(env,[]) tys ~f:(fun ty (env,acc) ->
+        let env,ty' = copy_tvar_typ ~env ty in
+        env, ty'::acc)
   in
-  sig_types @ types
+  env', params', tys'
 
-and types_in_module ?(add_prefix=false) m =
-  try
-    Id.typ m
-    |> decomp_tmodule
-    |> types_in_signature
-    |&add_prefix&> List.map (Pair.map_fst @@ Id.add_module_prefix_string ~m)
-  with Invalid_argument _ -> invalid_arg "constrs_defined_in_module"
+let tconstr ?id ?(attr=[]) name =
+  match id with
+  | None -> Id.new_var ~name ~attr ()
+  | Some id -> Id.make ~id name ~attr ()
+let path ?id ?attr name : path = LId (tconstr ?id ?attr name)
+let prim_path name = path ~id:0 ~attr:[Id.Primitive] name
 
-let fields_in_declaration decls =
-  let aux (_,ty) =
-    match ty with
-    | TRecord fields -> List.map fst fields
-    | _ -> []
-  in
-  List.flatten_map aux decls
+module Path = struct
+  type t = path
 
-let rec fields_in_signature sgn =
-  let constrs =
-    let aux x =
-      try
-        fields_in_module ~add_prefix:true x
-      with Invalid_argument _ -> []
-    in
-    List.flatten_map aux sgn.sig_values
-  in
-  constrs @ fields_in_declaration sgn.sig_types
+  let _LId x = LId (Id.set_typ x ())
+  let _LDot lid s = LDot(lid, s)
+  let _LApp lid1 lid2 = LApp(lid1, lid2)
 
-and fields_in_module ?(add_prefix=false) m =
-  try
-    Id.typ m
-    |> decomp_tmodule
-    |> fields_in_signature
-    |&add_prefix&> List.map (Id.add_module_prefix_string ~m)
-  with Invalid_argument _ -> invalid_arg "constrs_defined_in_module"
+  let id_of lid =
+    match lid with
+    | LId x -> x
+    | _ -> [%invalid_arg]
 
-let constrs_in_declaration decls =
-  let aux (_,ty) =
-    match ty with
-    | TVariant(false, labels) -> List.map fst labels
-    | _ -> []
-  in
-  List.flatten_map aux decls
+  let id_opt lid =
+    match lid with
+    | LId x -> Some x
+    | _ -> None
 
-let rec constrs_in_signature sgn =
-  let constrs =
-    let aux x =
-      try
-        constrs_in_module ~add_prefix:true x
-      with Invalid_argument _ -> []
-    in
-    List.flatten_map aux sgn.sig_values
-  in
-  constrs @ constrs_in_declaration sgn.sig_types
+  let rec cons m lid =
+    match lid with
+    | LId x -> LDot(LId (Id.set_typ m ()), Id.name x)
+    | LDot(p,s) -> LDot(cons m p, s)
+    | _ -> [%invalid_arg]
 
-and constrs_in_module ?(add_prefix=false) m =
-  try
-    Id.typ m
-    |> decomp_tmodule
-    |> constrs_in_signature
-    |&add_prefix&> List.map (Id.add_module_prefix_string ~m)
-  with Invalid_argument _ -> invalid_arg "constrs_defined_in_module"
+  let rec append path1 path2 =
+    match path2 with
+    | LId x -> LDot(path1, Id.name x)
+    | LDot(path2',s) -> LDot(append path1 path2', s)
+    | LApp _ -> [%invalid_arg]
 
-let rec values_in_signature ?(extract_module=true) {sig_values} =
-  let values =
-    if extract_module then
-      let aux x =
-        try
-          values_in_module ~add_prefix:true ~extract_module x
-        with Invalid_argument _ -> []
-      in
-      List.flatten_map aux sig_values
-    else []
-  in
-  values @ sig_values
+  let append_opt path1 path2 =
+    match path1 with
+    | None -> path2
+    | Some path1' -> append path1' path2
 
-and values_in_module ?(add_prefix=false) ?(extract_module=true) m =
-  try
-    Id.typ m
-    |> decomp_tmodule
-    |> values_in_signature ~extract_module
-    |&add_prefix&> List.map (Id.add_module_prefix ~m)
-  with Invalid_argument _ -> invalid_arg "values_in_module"
+  let rec head lid =
+    match lid with
+    | LId x -> x
+    | LDot(p, _) -> head p
+    | LApp _ -> [%invalid_arg]
 
+  let rec last lid =
+    match lid with
+    | LId x -> Id.name x
+    | LDot(_, s) -> s
+    | LApp(_, lid2) -> last lid2
 
-module Ty = struct
-  let unit = TBase TUnit
-  let bool = TBase TBool
-  let int = TBase TInt
-  let prim s = TBase (TPrim s)
-  let fun_ = make_tfun
-  let funs tys ty = List.fold_right make_tfun tys ty
-  let pfun = make_ptfun
-  let tuple = make_ttuple
-  let pair = make_tpair
-  let ( * ) = pair
-  let list = make_tlist
-  let ref = make_tref
-  let option = make_toption
-  let array = make_tarray
-  let set = make_tset
+  let rec print fm lid =
+    match lid with
+    | LId x ->
+        let s =
+          if !Flag.Print.var_id then
+            Id.to_string x
+          else
+            Id.name x
+        in
+        Format.fprintf fm "%s" s
+    | LDot(p,s) -> Format.fprintf fm "%a.%s" print p s
+    | LApp(p1,p2) -> Format.fprintf fm "%a(%a)" print p1 print p2
+  let pp = pp_path
+
+  let to_string lid = Format.asprintf "%a" print lid
+  let name = to_string
+
+  let rec of_string s =
+    if s = "" then [%invalid_arg];
+    if String.last s = ')' then
+      unsupported "%s" __FUNCTION__
+    else
+      match String.rsplit s ~by:"." with
+      | exception Not_found -> LId (Id.make s ())
+      | s1, s2 -> LDot(of_string s1, s2)
+
+  let rec flatten acc = function
+    | LId s -> s, acc
+    | LDot(lid, s) -> flatten (s :: acc) lid
+    | LApp(_, _) -> [%invalid_arg]
+  let flatten lid = flatten [] lid
+
+  let rec head lid =
+    match lid with
+    | LId id -> id
+    | LDot(p, _) -> head p
+    | LApp _ -> [%invalid_arg]
+
+  let equal = equal_path
+  let eq = equal
+
+  let rec compare lid1 lid2 =
+    match lid1, lid2 with
+    | LId _, (LDot _ | LApp _) -> -1
+    | LDot _, LApp _ -> -1
+    | LApp _, (LDot _ | LId _) -> 1
+    | LDot _, LId _ -> 1
+    | LId id1, LId id2 -> Id.compare id1 id2
+    | LDot(p1,s1), LDot(p2,s2) -> Compare.dict compare p1 p2 Stdlib.compare s1 s2
+    | LApp(p11,p12), LApp(p21,p22) -> Compare.dict compare p11 p21 compare p12 p22
+
+  let rec map ~f ?(g=Fun.id) lid =
+    match lid with
+    | LId id -> LId (f id)
+    | LDot(lid', s) -> LDot(map ~f ~g lid', g s)
+    | LApp(lid1, lid2) -> LApp(map ~f ~g lid1, map ~f ~g lid2)
+
+  let map_name g lid = map ~f:(Id.map_name g) ~g lid
+
+  let rec is_external lid =
+    match lid with
+    | LId id -> Id.is_external id
+    | LDot(p, _)
+    | LApp(p, _) -> is_external p
+
+  let rec is_primitive lid =
+    match lid with
+    | LId id -> Id.is_primitive id
+    | LDot(p, _)
+    | LApp(p, _) -> is_primitive p
+
+  let rec decomp_lapp lid =
+    match lid with
+    | LId _
+    | LDot _ -> lid, []
+    | LApp(lid1,lid2) ->
+        let lid1',lids = decomp_lapp lid1 in
+        lid1', lids@[lid2]
+
+  let rec has_app path =
+    match path with
+    | LId _ -> false
+    | LDot(path', _) -> has_app path'
+    | LApp _ -> true
+
+  let rec is_prefix path1 path2 =
+    if path1 = path2 then
+      true
+    else
+      match path2 with
+      | LDot(path2', _) -> is_prefix path1 path2'
+      | _ -> false
+
+  let rec subst_head_map map path =
+    let sbst = subst_head_map map in
+    match path with
+    | LId x -> Id.List.assoc_default path x map
+    | LDot(path1,s) -> LDot(sbst path1,s)
+    | LApp(path1,path2) -> LApp(sbst path1, sbst path2)
+
+  let subst_head x lid path = subst_head_map [x,lid] path
+
+  let rec subst_prefix_map map path =
+    let sbst = subst_prefix_map map in
+    match path with
+    | LId _ -> path
+    | LDot(path1,s) ->
+        let path1' = List.assoc_default ~eq:(eq ~eq:(Compare.eq_on Id.name)) path1 path1 map in
+        LDot(path1', s)
+    | LApp(path1,path2) -> LApp(sbst path1, sbst path2)
+
+  let (=) = eq
 end
+
+module C = struct
+  let obj = prim_path "obj"
+  let class_ = prim_path "class"
+  let list = prim_path "list"
+  let set = prim_path "set"
+  let ref = prim_path "ref"
+  let option = prim_path "option"
+  let array = prim_path "array"
+  let lazy_ = prim_path "lazy"
+  let unknown = prim_path "???"
+  let abst = prim_path "abst"
+  let exn = prim_path "exn"
+  let char = prim_path "char"
+  let float = prim_path "float"
+  let string = prim_path "string"
+  let result = prim_path "X"
+
+  let is_obj = Path.eq obj
+  let is_class_ = Path.eq class_
+  let is_list = Path.eq list
+  let is_set = Path.eq set
+  let is_ref = Path.eq ref
+  let is_option = Path.eq option
+  let is_array = Path.eq array
+  let is_lazy_ = Path.eq lazy_
+  let is_unknown = Path.eq unknown
+  let is_abst = Path.eq abst
+  let is_exn = Path.eq exn
+  let is_char = Path.eq char
+  let is_float = Path.eq float
+  let is_string = Path.eq string
+  let is_result = Path.eq result
+
+  let base_prims =
+    [char;
+     float;
+     string]
+
+  let prims =
+    [obj;
+     class_;
+     list;
+     set;
+     ref;
+     option;
+     array;
+     lazy_;
+     unknown;
+     abst;
+     exn;
+     result] @ base_prims
+end
+
+(** [instantiate p1 p2] instantiates [p1] by [p2] ([p1] must be a type variable) *)
+let instantiate p1 p2 =
+  match p1 with
+  | TVar(_, ({contents=None} as r), _) -> r := Some p2
+  | _ -> [%invalid_arg]
+
+exception Sig_of_Lid of path
+type 'a mod_env = 'a mod_typ list
+and 'a mod_typ = unit Id.t * 'a t
+[@@deriving show]
+
+(* TODO: Support TConstr _ *)
+let rec sig_of_mod_typ ~(env : 'a mod_env) ty =
+  match elim_tattr ty with
+  | TModSig sgn -> sgn
+  | TModLid (LId m) ->
+      (try
+         let ty = Id.List.assoc m env in
+         if ty = TModLid (LId m) then [%invalid_arg];
+         sig_of_mod_typ ~env ty
+       with Not_found -> [%invalid_arg])
+  | TModLid (LDot _ as m) -> raise (Sig_of_Lid m)
+  | TModLid (LApp _) -> [%invalid_arg]
+  | TConstr(_, []) -> [%unsupported]
+  | _ -> [%invalid_arg]
+let sig_of_id ~(env : 'a mod_env) m = sig_of_mod_typ ~env @@ Id.typ m
+
+let is_mod_typ ty =
+  match elim_tattr ty with
+  | TModSig _
+  | TModLid _ -> true
+  | _ -> false
+let is_mod_var x = is_mod_typ @@ Id.typ x
+
+let subst_tconstr map ty =
+  make_trans (fun tr ty ->
+      match ty with
+      | TConstr(LId c, params) when Id.List.mem_assoc c map ->
+          Some (TConstr(Id.List.assoc c map, List.map tr params))
+      | _ -> None) ty
+
+let subst_path_head_map map =
+  make_trans (fun tr ty ->
+      match ty with
+      | TConstr(path, tys) -> Some (TConstr(Path.subst_head_map map path, List.map tr tys))
+      | _ -> None)
+
+let subst_path_head x lid = subst_path_head_map [x,lid]
+
+let subst_path_prefix_map map =
+  make_trans (fun tr ty ->
+      match ty with
+      | TConstr(path, tys) -> Some (TConstr(Path.subst_prefix_map map path, List.map tr tys))
+      | _ -> None)
+
+let subst_path_map map =
+  make_trans (fun tr ty ->
+      match ty with
+      | TConstr(path, tys) -> Some (TConstr(List.subst ~eq:Path.eq  map path, List.map tr tys))
+      | _ -> None)
+
+let add_prefix_opt prefix path =
+  match prefix with
+  | None -> path
+  | Some p -> Path.append p path
+
+type 'a sig_elem =
+  | Sig_types of 'a decl_item
+  | Sig_ext of 'a ext
+  | Sig_values of 'a tid
+let _Sig_types decl = Sig_types decl
+let _Sig_ext ext = Sig_ext ext
+let _Sig_values x = Sig_values x
+
+let map_sig_elem f elem =
+  match elem with
+  | Sig_types (c, (p, ty)) -> Sig_types (c, (p, f ty))
+  | Sig_ext (c, (p, {ext_row_path; ext_row_args; ext_row_ret})) ->
+      let ext_row_args = List.map f ext_row_args in
+      let ext_row_ret = Option.map f ext_row_ret in
+      Sig_ext (c, (p, {ext_row_path; ext_row_args; ext_row_ret}))
+  | Sig_values x -> Sig_values (Id.map_typ f x)
+
+let cons_prefix m (p, e) =
+  let m' = Id.set_typ m () in
+  let p' =
+    match p with
+    | None -> Some (LId m')
+    | Some path -> Some (Path.cons m' path)
+  in
+  p', e
+
+let rec flatten_signature ~env {sig_types; sig_ext; sig_values} : (path option * _ sig_elem) list =
+  let sig_values_mod = List.filter (Id.typ |- is_mod_typ) sig_values in
+  let none f x = None, f x in
+  List.rev_flatten
+    [List.map (none _Sig_types) @@ List.flatten sig_types;
+     List.map (none _Sig_ext) sig_ext;
+     List.map (none _Sig_values) sig_values;
+     List.flatten_map (flatten_signature_of_mod ~env) sig_values_mod]
+
+and flatten_signature_of_mod ~env m =
+  let sgn =
+    m
+    |> sig_of_id ~env
+    |> flatten_signature ~env
+  in
+  let path_map =
+    sgn
+    |> List.filter_map (function
+           | (p, Sig_types (c, _)) ->
+                   let path = add_prefix_opt p (LId c) in
+                   Some (path, Path.cons m path)
+           | _ -> None)
+  in
+  sgn
+  |> List.map (cons_prefix m)
+  |> Fmap.(list (snd (map_sig_elem (subst_path_map path_map))))
+
+let types_in_signature ~(env : 'a mod_env) sgn : (path option * _ decl_item) list =
+  sgn
+  |> flatten_signature ~env
+  |> List.filter_map (function (p, Sig_types x) -> Some (p,x) | _ -> None)
+
+and types_in_module ~(env : 'a mod_env) m : (path option * _ decl_item) list =
+  m
+  |> flatten_signature_of_mod ~env
+  |> List.filter_map (function (p, Sig_types x) -> Some (p,x) | _ -> None)
+
+let fields_in_decl_item (decl : _ decl_item) =
+  match decl with
+  | _, (_, TRecord fields) -> List.map (fst |- Path._LId) fields
+  | _ -> []
+
+let fields_in_declaration (decl : _ declaration) =
+  decl
+  |> List.rev_flatten_map fields_in_decl_item
+
+let fields_in_declarations (decls : _ declaration list) =
+  List.flatten_map fields_in_declaration decls
+
+(* TODO: use types_in_signature or flatten_signature *)
+let rec fields_in_signature ~(env : 'a mod_env) sgn : path list =
+  fields_in_declarations sgn.sig_types @@@
+  (sgn.sig_values
+   |> List.filter (is_mod_typ -| Id.typ)
+   |> List.rev_flatten_map (fields_in_module ~env))
+
+(* TODO: use types_in_module or flatten_signature_of_mod *)
+and fields_in_module ~(env : 'a mod_env) m : path list =
+  types_in_module ~env m
+  |> List.rev_flatten_map (fun (p,decl) -> List.map (Pair.pair p) @@ fields_in_decl_item decl)
+  |> List.map (Fun.uncurry add_prefix_opt)
+
+let constrs_in_declaration (decl : _ declaration) : constr list =
+  decl
+  |> List.rev_flatten_map (function
+         | _, (_, TVariant(VNonPoly, rows)) -> List.map row_constr rows
+         | _ -> [])
+
+let constrs_in_declarations (decls : _ declaration list) : constr list =
+  List.rev_flatten_map constrs_in_declaration decls
+
+(* TODO: use types_in_signature or flatten_signature *)
+let rec constrs_in_signature ~(env : 'a mod_env) sgn =
+  let constrs1 =
+    sgn.sig_values
+    |> List.filter (is_mod_typ -| Id.typ)
+    |> List.rev_flatten_map (constrs_in_module ~add_prefix:true ~env)
+  in
+  let constrs2 =
+    sgn.sig_types
+    |> constrs_in_declarations
+    |> List.rev_map Path._LId
+  in
+  constrs1 @@@ constrs2
+
+(* TODO: use types_in_module or flatten_signature_of_mod *)
+and constrs_in_module ?(add_prefix=false) ~(env : 'a mod_env) m =
+  try
+    sig_of_id ~env m
+    |> constrs_in_signature ~env
+    |&add_prefix&> List.map (Path.cons m)
+  with Invalid_argument _ -> invalid_arg "constrs_defined_in_module"
+
+let values_in_signature ~(env : 'a mod_env) sgn : (path option * _ tid) list =
+  sgn
+  |> flatten_signature ~env
+  |> List.filter_map (function (p, Sig_values x) -> Some (p,x) | _ -> None)
+
+let values_in_module ~(env : 'a mod_env) m : (path option * _ tid) list =
+  m
+  |> flatten_signature_of_mod ~env
+  |> List.filter_map (function (p, Sig_values x) -> Some (p,x) | _ -> None)
+
+let add_module_prefix_tconstr_map mod_path (prefix,decl) =
+  let prefix' =
+    match prefix with
+    | None -> LId mod_path
+    | Some p -> Path.cons mod_path p
+  in
+  let make (c,_) = c, LDot(prefix', Id.name c) in
+  List.map make decl
+
+let assoc_row constr rows =
+  List.find (row_constr |- Id.(=) constr) rows
+
+let assoc_row_with_pos ~sort constr rows =
+  rows
+  |&sort&> List.sort (Compare.on (row_constr |- Id.name))
+  |> List.find_mapi (fun i row ->
+      if Id.(constr = row.row_constr) then
+        Some (i, row.row_args)
+      else
+        None)
+
+let apply_tconstr pty tys =
+  let _,(params,ty) = copy_tconstr_params pty in
+  if List.length params <> List.length tys then invalid_arg "%s" __FUNCTION__;
+  List.iter2 instantiate params tys;
+  match ty with
+  | TConstraint(ty', cs) ->
+      List.iter (fun (p,ty) -> assert (eq p ty)) cs;
+      ty'
+  | _ -> ty

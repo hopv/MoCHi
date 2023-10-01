@@ -1,10 +1,11 @@
 open Util
 open Syntax
 open Type
+open Type_util
 open Term_util
 
 module RT = Ref_type
-module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
+module Dbg = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
 
 exception Ref_type_not_found
 
@@ -34,7 +35,7 @@ let is_base_const t =
 
 let is_simple_expr t =
   let r = is_simple_bexp t || is_simple_aexp t || is_base_const t in
-  if false then Format.printf "is_simple_expr (%a): %b@." Print.term t r;
+  if false then Format.fprintf !Flag.Print.target "is_simple_expr (%a): %b@." Print.term t r;
   r
 
 let simple_expr_ty t =
@@ -44,14 +45,15 @@ let simple_expr_ty t =
 
 let rec lift_ty env ?np sty =
   match sty with
-  | TData _ when sty = typ_result -> RT.typ_result
+  | TConstr _ when sty = typ_result -> RT.typ_result
   | TBase base ->
       let x = Id.new_var sty in
       let base_env = to_base_env env in
       let args = x :: RT.Env.keys base_env in
       let pred =
-        let name = Option.map (fun (name,path) -> if path = [] then name else name ^ ":" ^ (String.join ":" @@ List.rev_map string_of_int path)) np in
-        let pvar = PredVar.new_pvar ?name @@ List.map Id.typ args in
+        let name = Option.map (fun (name,path) -> String.join ":" @@ (name :: List.rev_map string_of_int path)) np in
+        let id = match np with Some (_, _::_) -> Some 0 | _ -> None in
+        let pvar = PredVar.new_pvar ?name ?id @@ List.map Id.typ args in
         Term.(var pvar @ vars args)
       in
       RT.Base(base, x, pred)
@@ -83,17 +85,17 @@ let rec lift_ty env ?np sty =
       RT.Base(base, x, p)
   | TAttr(_::attrs,sty') -> lift_ty env ?np (TAttr(attrs,sty'))
   | _ ->
-      Format.eprintf "LIFT: %a@." Print.typ sty;
+      Format.eprintf "@[LIFT: %a@." Print.typ sty;
       assert false
 let lift env ?name t =
-  Debug.printf "LIFT: (%a): %a@." Print.term t Print.typ t.typ;
+  Dbg.printf "LIFT: @[(%a): %a@." Print.term t Print.typ t.typ;
   let r =
     if is_simple_expr t then
       simple_expr_ty t
     else
       lift_ty env ?np:(Option.map (Pair.pair -$- []) name) t.typ
   in
-  Debug.printf "   => %a@." RT.print r;
+  Dbg.printf "   => %a@." RT.print r;
   r
 
 let print_env = Print.(list (id * RT.print))
@@ -120,13 +122,13 @@ let const_ty c =
   | Rand(TBase TInt, true) ->
       RT.Ty.(fun_ !!unit (fun_ (fun_ !!int result) result))
   | _ ->
-      Format.printf "c: %a@." Print.const c;
+      Format.eprintf "c: %a@." Print.const c;
       assert false
 
 let rec gen_sub env t ty : sub_constr list =
-  if false then Debug.printf "env: %a@." RT.Env.print env;
-  if false then Debug.printf "t: %a@." Print.term' t;
-  if false then Debug.printf "ty: %a@.@." RT.print ty;
+  if false then Dbg.printf "env: %a@." RT.Env.print env;
+  if false then Dbg.printf "t: %a@." Print.term' t;
+  if false then Dbg.printf "ty: %a@.@." RT.print ty;
   match t.desc with
   | _ when is_simple_expr t ->
       let aty = simple_expr_ty t in
@@ -141,12 +143,13 @@ let rec gen_sub env t ty : sub_constr list =
         []
       else
         [env, (aty, ty)]
-  | Var x ->
+  | Var (LId x) ->
       let ty' = RT.Env.assoc x env in
       if RT.equiv ty' ty then
         []
       else
         [env, (ty', ty)]
+  | Var _ -> unsupported "Ref_type_check"
   | Fun(x, t') ->
       begin
         match ty with
@@ -191,23 +194,29 @@ let rec gen_sub env t ty : sub_constr list =
   | Event("fail",true) ->
       let aty = RT.Ty.(fun_ (unit ~pred:Term.false_ ()) @@ fun_ (fun_ !!unit result) result) in
       [env, (aty, ty)];
-  | Tuple ts when List.for_all is_var ts ->
+  | Tuple ts when List.for_all Syntax.Is._Var ts ->
       let aty =
-        let xs = List.map (Option.get -| decomp_var) ts in
-        let atys = List.map (RT.Env.assoc -$- env) xs in
+        let xs = List.map (Lid.id_of -| Syntax.ValE._Var) ts in
+        let atys =
+          List.L.map xs ~f:(fun x ->
+              if is_base_typ @@ Id.typ x then
+                simple_expr_ty (Term.var x)
+              else
+                (RT.Env.assoc x env))
+        in
         RT.Tuple (List.combine xs atys)
       in
       [env, (aty, ty)]
   | Tuple ts ->
       let t' =
-        let xs = List.map (fun t -> match decomp_var t with None -> new_var_of_term t | Some x -> x) ts in
+        let xs = List.map (fun t -> match Syntax.Val._Var t with None -> new_var_of_term t | Some x -> Lid.id_of x) ts in
         let t0 = Term.(tuple (vars xs)) in
-        let aux x t acc = if is_var t then subst x t acc else Term.(let_ [x,t] acc) in
+        let aux x t acc = if Syntax.Is._Var t then subst x t acc else Term.(let_ [x,t] acc) in
         List.fold_right2 aux xs ts t0
       in
-      Debug.printf "NORMALIZE: @[%a =>@ @[%a@." Print.term t Print.term t';
+      Dbg.printf "NORMALIZE: @[%a =>@ @[%a@." Print.term t Print.term t';
       gen_sub env t' ty
-  | Proj(i,{desc=Var x}) ->
+  | Proj(i,{desc=Var (LId x)}) ->
       let env',aty =
         match RT.Env.assoc x env with
         | RT.Tuple xtys ->
@@ -220,29 +229,9 @@ let rec gen_sub env t ty : sub_constr list =
       [RT.Env.merge env' env, (aty, ty)]
   | Proj(i,t1) ->
       let x = new_var_of_term t1 in
-      gen_sub env Term.(let_ [x,t1] (proj i (var x))) ty
+      gen_sub env [%term let x = `t1 in x ## i] ty
   | Bottom -> []
-  | Local _ -> unsupported __LOC__
-  | Label _ -> unsupported __LOC__
-  | Module _ -> unsupported __LOC__
-  | Event _ -> unsupported __LOC__
-  | Record _ -> unsupported __LOC__
-  | Field _ -> unsupported __LOC__
-  | SetField _ -> unsupported __LOC__
-  | Nil -> unsupported __LOC__
-  | Cons _ -> unsupported __LOC__
-  | Constr _ -> unsupported __LOC__
-  | Match _ -> unsupported __LOC__
-  | Raise _ -> unsupported __LOC__
-  | TryWith _ -> unsupported __LOC__
-  | Ref _ -> unsupported __LOC__
-  | Deref _ -> unsupported __LOC__
-  | SetRef _ -> unsupported __LOC__
-  | TNone -> unsupported __LOC__
-  | TSome _ -> unsupported __LOC__
-  | MemSet _ -> unsupported __LOC__
-  | AddSet _ -> unsupported __LOC__
-  | Subset _ -> unsupported __LOC__
+  | _ -> unsupported "Ref_type_check.gen_sub (%a)" Print.desc_constr t.desc
 
 
 let denote_ty x ty =
@@ -250,7 +239,8 @@ let denote_ty x ty =
   | RT.Base(_,y,p) -> subst_var y x p
   | RT.Fun _ -> true_term
   | RT.Tuple _ -> true_term
-  | _ -> unsupported __LOC__
+  | RT.Constr(_,_,y,p) -> subst_var y x p
+  | _ -> unsupported "%s" __LOC__
 
 let denote_env env =
   env
@@ -279,48 +269,55 @@ let rec flatten env (ty1,ty2) =
         env', sbst', acc'
       in
       Triple.trd @@ List.fold_left2 aux (env,Fun.id,[]) xtys1 xtys2
+  | RT.Constr(s1,[],x,_), RT.Constr(s2,[],_,_) ->
+      if s1 <> s2 then (Dbg.printf "s1: %s@.s2: %s@." (Path.name s1) (Path.name s2); invalid_arg "flatten");
+      let p = denote_ty x ty2 in
+      if p.desc = Const True then
+        []
+      else
+        [denote_ty x ty1::denote_env env, denote_ty x ty2]
   | _ ->
       Format.eprintf "ty1: %a@." RT.print ty1;
       Format.eprintf "ty2: %a@." RT.print ty2;
-      unsupported __LOC__
+      unsupported "%s" __LOC__
 let flatten env (ty1,ty2) =
   let r = flatten env (ty1,ty2) in
-  Debug.printf "FLATTEN env: @[%a@." RT.Env.print env;
-  Debug.printf "FLATTEN INPUT: @[%a <: %a@." RT.print ty1 RT.print ty2;
-  Debug.printf "FLATTEN OUTPUT: @[%a@.@." print_constrs r;
+  Dbg.printf "FLATTEN env: @[%a@." RT.Env.print env;
+  Dbg.printf "FLATTEN INPUT: @[%a <: %a@." RT.print ty1 RT.print ty2;
+  Dbg.printf "FLATTEN OUTPUT: @[%a@.@." print_constrs r;
   r
 
 let wrap_id constrs =
-  let aux x =
-    let name = Id.to_string x in
-    if Id.is_predicate x || String.fold_left (fun acc c -> acc && (Char.is_letter c || Char.is_digit c || List.mem c ['~';'!';'@';'$';'%';'^';'&';'*';'_';'-';'+';'=';'<';'>';'.';'?'])) true name then
-      x
-    else
-      Id.make 0 ("|" ^ name ^ "|") [] @@ Id.typ x
+  let wrap =
+    Trans.map_var (fun x ->
+        let name = Id.to_string x in
+        if Id.is_predicate x || String.fold_left (fun acc c -> acc && (Char.is_letter c || Char.is_digit c || String.mem c "~!@$%^&*_-+=<>.?")) true name then
+          x
+        else
+          Id.make ("|" ^ name ^ "|") @@ Id.typ x)
   in
-  let wrap = Trans.map_id aux in
-  List.map (fun (ts,t) -> List.map wrap ts, wrap t) constrs
+  List.map (Pair.map (List.map wrap) wrap) constrs
 
 
 
 let gen_hcs env t ty =
   let ty = RT.rename ~full:true ty in
   let env = RT.Env.map_value (RT.rename ~full:true) env in
-  Debug.printf "Ref_type_check:@.";
-  Debug.printf "  t: %a@." Print.term_typ t;
-  Debug.printf "  ty: %a@." RT.print ty;
-  Debug.printf "  env: %a@." RT.Env.print env;
+  Dbg.printf "Ref_type_check:@.";
+  Dbg.printf "  t: %a@." Print.term_typ t;
+  Dbg.printf "  ty: %a@." RT.print ty;
+  Dbg.printf "  env: %a@." RT.Env.print env;
   gen_sub env t ty
-  |@> Debug.printf "Subtyping constraints:@.  @[%a@.@." print_sub_constrs
+  |@> Dbg.printf "Subtyping constraints:@.  @[%a@.@." print_sub_constrs
   |> List.flatten_map (Fun.uncurry flatten)
-  |@> Debug.printf "Constraints:@.  @[%a@.@." print_constrs
+  |@> Dbg.printf "Constraints:@.  @[%a@.@." print_constrs
   |&!use_simplification&> (CHC.of_term_list |- CHC.simplify |- snd |- CHC.to_term_list)
   |> wrap_id
-  |@!use_simplification&> Debug.printf "Simplified:@.  @[%a@.@." print_constrs
+  |@!use_simplification&> Dbg.printf "Simplified:@.  @[%a@.@." print_constrs
   |> FpatInterface.to_hcs
-  |@> Debug.printf "Constraints:@.  @[%a@.@." Fpat.HCCS.pr
+  |@> Dbg.printf "Constraints:@.  @[%a@.@." Fpat.HCCS.pr
   |&!use_simplification&> Fpat.HCCS.simplify_full []
-  |@!use_simplification&> Debug.printf "Simplified by Fpat:@.  @[%a@.@." Fpat.HCCS.pr
+  |@!use_simplification&> Dbg.printf "Simplified by Fpat:@.  @[%a@.@." Fpat.HCCS.pr
   |*@> Fpat.HCCS.save_graphviz "test.dot"
 
 let check env t ty =
@@ -332,6 +329,6 @@ let check env t ty =
 
 let print cout env t ty =
   let hcs = gen_hcs env t ty in
-  let filename = Filename.change_extension !!Flag.Input.main "smt2" in
+  let filename = Filename.change_extension !!Flag.IO.temp "smt2" in
   Fpat.HCCS.save_smtlib2 filename hcs;
   Printf.fprintf cout "%s" @@ IO.input_file filename

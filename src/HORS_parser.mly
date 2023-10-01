@@ -4,6 +4,7 @@
 
 %token <string> IDENT
 %token DOT LPAREN RPAREN ARROW
+%token EOF
 
 %nonassoc LPAREN IDENT
 
@@ -14,31 +15,31 @@
 %%
 
 top:
-| rule_list
-    { $1 }
+| rules=rule_list EOF
+    { rules }
 | error
     { failwith "parse error" }
 
 rule_list:
 |
     { [] }
-| rule DOT rule_list
-    { $1 :: $3 }
+| r=rule DOT rs=rule_list
+    { r::rs }
 
 rule:
-| IDENT args ARROW expr
-    { ($1, List.fold_right (fun arg e -> Abst (arg, e)) $2 $4) }
+| IDENT args=args ARROW e=expr
+    { ($1, List.fold_right (fun arg e -> Abst (arg, e)) args e) }
 
 args:
 |
     { [] }
-| IDENT args
-    { $1 :: $2 }
+| x=IDENT xs=args
+    { x::xs }
 
 expr:
-| LPAREN expr RPAREN
-    { $2 }
-| IDENT
-    { Var($1) }
-| expr expr %prec APPLY
-    { Apply($1, $2) }
+| LPAREN e=expr RPAREN
+    { e }
+| x=IDENT
+    { Var x }
+| e1=expr e2=expr %prec APPLY
+    { Apply(e1, e2) }

@@ -1,6 +1,9 @@
 open Util
 open Syntax
+open Type_util
 open Term_util
+
+type env = (id * typ) list
 
 type t =
     {assertion: (id * Ref_type.t) list;
@@ -37,7 +40,7 @@ let pr_env ppf (x,typ) = Format.fprintf ppf "%a: %a" Print.id x (Color.blue Prin
 let print_aux ppf s pr env =
   if env <> [] then
     begin
-      Color.fprintf ppf Color.Red "@,@[[%s]@\n  @[" s;
+      Color.fprintf ppf Red "@,@[[%s]@\n  @[" s;
       print_list pr "@\n" ppf env;
       Format.fprintf ppf "@]@]"
     end
@@ -63,6 +66,7 @@ let print ppf {assertion; ref_env; ext_ref_env; abst_env; abst_cps_env; abst_ceg
   print_inlined ppf inlined;
   print_inlined_f ppf inlined_f;
   Format.fprintf ppf "@]"
+let pp = print
 
 let merge spec1 spec2 =
   {assertion = spec1.assertion @ spec2.assertion;
@@ -79,12 +83,12 @@ let merge spec1 spec2 =
 (* Getters *)
 
 let get_def_vars =
-  let col = make_col2 [] (@@@) in
+  let col = Col2.make [] (@@@) in
   let col_decl prefix decl =
     match decl with
     | Decl_let defs ->
         let xs = List.map fst defs in
-        let vars = List.rev_flatten_map (snd |- col.col2_term prefix) defs in
+        let vars = List.rev_flatten_map (snd |- col.term prefix) defs in
         List.map prefix xs @@@ vars
     | _ -> []
   in
@@ -92,12 +96,12 @@ let get_def_vars =
     match desc with
     | Local(Decl_let[m,{desc=Module decls}], t) ->
         let prefix' x = Id.add_module_prefix (prefix x) ~m in
-        List.rev_flatten_map (col.col2_decl prefix') decls @@@ col.col2_term prefix t
-    | _ -> col.col2_desc_rec prefix desc
+        List.rev_flatten_map (col.decl prefix') decls @@@ col.term prefix t
+    | _ -> col.desc_rec prefix desc
   in
-  col.col2_decl <- col_decl;
-  col.col2_desc <- col_desc;
-  col.col2_term Fun.id
+  col.decl <- col_decl;
+  col.desc <- col_desc;
+  col.term Fun.id
 
 
 type kind =
@@ -129,7 +133,7 @@ let rename_ids ks {assertion; ref_env; ext_ref_env; abst_env; abst_cps_env; abst
           Format.eprintf "VAR: %a@." Id.print f;
           Format.eprintf "  Prog: %a@." Print.typ @@ Id.typ f';
           Format.eprintf "  Spec: %a@." Ref_type.print typ;
-          fatal @@ Format.sprintf "The simple type of %s in the specification is wrong?" @@ Id.name f'
+          failwith "The simple type of %a in the specification is wrong?" Print.id f'
         end;
       Some (f', typ)
     with Not_found -> None
@@ -152,7 +156,7 @@ let rename_ids ks {assertion; ref_env; ext_ref_env; abst_env; abst_cps_env; abst
    fairness}
 
 let get_vars t = get_def_vars t @ get_fv t
-let get_vars_cegar prog = List.map (fun def -> Id.from_string def.CEGAR_syntax.fn Type.typ_unknown) prog.CEGAR_syntax.defs
+let get_vars_cegar prog = List.map (fun def -> Id.of_string def.CEGAR_syntax.fn Ty.unknown) prog.CEGAR_syntax.defs
 
 let get_assertion spec t = (rename_ids [Assertion] spec @@ get_vars t).assertion
 let get_ref_env spec t = (rename_ids [Ref_env] spec @@ get_vars t).ref_env
@@ -193,16 +197,16 @@ let map_ref f spec = map_ref_env (Pair.map_snd f) spec
 (* Normalizer *)
 
 let set_typ_to_id ({assertion; ref_env; ext_ref_env; abst_env; abst_cps_env; abst_cegar_env} as m) =
-  if abst_env @ abst_cps_env @ abst_cegar_env <> [] then
-    unsupported "Spec.set_typ_to_id";
+  let aux (f,ty) = Id.set_typ f ty, ty in
   let aux_ref (f,ty) = Id.set_typ f (Ref_type.to_simple ty), ty in
   let aux_ext_ref (f,loc,ty) = Id.set_typ f (Ref_type.to_simple ty), loc, ty in
+  let abst_env = List.map aux abst_env in
+  let abst_cps_env = List.map aux abst_cps_env in
+  let abst_cegar_env = List.map aux abst_cegar_env in
   let assertion = List.map aux_ref assertion in
   let ref_env = List.map aux_ref ref_env in
   let ext_ref_env = List.map aux_ext_ref ext_ref_env in
-  {m with assertion; ref_env; ext_ref_env}
-
-let adt_to_prim = map_ref Ref_type.adt_to_prim
+  {m with assertion; ref_env; ext_ref_env; abst_env; abst_cps_env; abst_cegar_env}
 
 
 (* Parser *)
@@ -213,7 +217,7 @@ let parse parser lexer filename =
   else
     let lb = Lexing.from_channel @@ open_in filename in
     lb.Lexing.lex_curr_p <-
-      {Lexing.pos_fname = Format.sprintf "File \"%s\"" @@ Filename.basename filename;
+      {Lexing.pos_fname = Format.sprintf {|File "%s"|} @@ Filename.basename filename;
        Lexing.pos_lnum = 1;
        Lexing.pos_cnum = 0;
        Lexing.pos_bol = 0};
@@ -232,7 +236,7 @@ let parse_comment parser lexer filename =
   in
   let lb = Lexing.from_string @@ loop false "" in
     lb.Lexing.lex_curr_p <-
-      {Lexing.pos_fname = Format.sprintf "Spec in file \"%s\"" @@ Filename.basename filename;
+      {Lexing.pos_fname = Format.sprintf {|Spec in file "%s"|} @@ Filename.basename filename;
        Lexing.pos_lnum = 0;
        Lexing.pos_cnum = 0;
        Lexing.pos_bol = 0};
@@ -242,21 +246,18 @@ let read parser lexer =
   Id.save_counter ();
   let spec1 =
     begin
-      if !Flag.Method.use_spec && !Flag.Input.spec = ""
+      if !Flag.Method.use_spec && !Flag.IO.spec = ""
       then
-        let spec = Filename.change_extension !!Flag.Input.main "spec" in
-        if Sys.file_exists spec then Flag.Input.spec := spec
+        let spec = Filename.change_extension !!Flag.IO.main "spec" in
+        if Sys.file_exists spec then Flag.IO.spec := spec
     end;
-    parse parser lexer !Flag.Input.spec
+    parse parser lexer !Flag.IO.spec
   in
   let spec2 =
-    if !Flag.Method.comment_spec && Sys.file_exists !!Flag.Input.main
-    then parse_comment parser lexer !!Flag.Input.main
+    if !Flag.Method.comment_spec && Sys.file_exists !!Flag.IO.main
+    then parse_comment parser lexer !!Flag.IO.main
     else init
   in
-  let spec =
-    merge spec1 spec2
-    |> adt_to_prim
-  in
+  let spec = merge spec1 spec2 in
   Id.reset_counter ();
   set_typ_to_id spec

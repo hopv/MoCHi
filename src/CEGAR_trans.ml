@@ -9,6 +9,7 @@ exception EvalRestart
 exception EvalTerminate
 
 module S = Syntax
+module TU = Type_util
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
 
@@ -108,7 +109,7 @@ let nil_pred _ = []
 let trans_var x =
   let s =
     Id.to_string x
-    |> String.filter_out (fun c -> List.mem c ['(';')'])
+    |> String.filter_out (fun c -> List.mem c ['(';')';' '])
   in
   if String.is_sign s.[0] || String.starts_with s "op" then
     "op" ^ s
@@ -116,7 +117,7 @@ let trans_var x =
     s
 let trans_inv_var s =
   let s = if String.starts_with s "op" then s else s in
-  Id.from_string s Type.typ_unknown
+  Id.of_string s TU.Ty.unknown
 
 let id_prog prog =
   let map = List.rev_map (fun (f,_) -> f, f) prog.env in
@@ -177,26 +178,25 @@ let rec preds_of typ =
       end
   | _ -> fun _ -> []
 
-and trans_typ ty =
+and trans_typ (ty : S.typ) =
   match ty with
-  | Type.TBase Type.TUnit -> typ_unit
-  | Type.TBase Type.TBool -> typ_bool ()
-  | Type.TBase Type.TInt -> typ_int
-  | Type.TBase (Type.TPrim s) -> TBase(TAbst s, nil_pred)
-  | Type.TVar({contents=None},_) -> typ_int
-  | Type.TVar({contents=Some typ},_) -> trans_typ typ
-  | Type.TFun(x,typ) ->
+  | TBase TUnit -> typ_unit
+  | TBase TBool -> typ_bool ()
+  | TBase TInt -> typ_int
+  | TVar(_,{contents=None},_) -> typ_int
+  | TVar(_,{contents=Some typ},_) -> trans_typ typ
+  | TFun(x,typ) ->
       let typ1 = trans_typ @@ Id.typ x in
       let typ2 = trans_typ typ in
       TFun(typ1, subst_typ (trans_var x) -$- typ2)
-  | Type.TData s -> TBase(TAbst s, nil_pred)
-  | Type.TAttr([], typ) -> trans_typ typ
-  | Type.TAttr(Type.TAId _::attrs, typ) -> trans_typ @@ Type.TAttr(attrs, typ)
-  | Type.TAttr(Type.TAPredShare _::attrs, typ) -> trans_typ @@ Type.TAttr(attrs, typ)
-  | Type.TAttr(Type.TARefPred(x,p)::attrs, typ) ->
+  | TConstr(s,[]) -> TBase(TAbst (TU.string_of_path s), nil_pred)
+  | TAttr([], typ) -> trans_typ typ
+  | TAttr(TAId _::attrs, typ) -> trans_typ @@ Type.TAttr(attrs, typ)
+  | TAttr(TAPredShare _::attrs, typ) -> trans_typ @@ Type.TAttr(attrs, typ)
+  | TAttr(TARefPred(x,p)::attrs, typ) ->
       let p' y = subst (trans_var x) y @@ snd @@ trans_term "" [] [] p in
       TConstr(TFixPred p', [trans_typ @@ Type.TAttr(attrs,typ)], fun _ -> [])
-  | Type.TAttr _ when Term_util.get_tapred ty <> None ->
+  | TAttr _ when Term_util.get_tapred ty <> None ->
       let x,ps = Option.get @@ Term_util.get_tapred ty in
       begin
         let x' = trans_var x in
@@ -211,8 +211,8 @@ and trans_typ ty =
             TBase(b, preds')
         | typ -> Format.eprintf "trans_typ[TPred]: %a@." CEGAR_print.typ typ; assert false
       end
-  | Type.TTuple xs -> make_ttuple @@ List.map (trans_typ -| Id.typ) xs
-  | Type.TApp("set", [ty]) -> make_tset @@ trans_typ ty
+  | TTuple xs -> make_ttuple @@ List.map (trans_typ -| Id.typ) xs
+  | TConstr(c, [ty]) when c = Type.C.set -> make_tset @@ trans_typ ty
   | typ ->
       Format.eprintf "trans_typ: %a@." Print.typ typ;
       assert false
@@ -245,30 +245,31 @@ and trans_const c =
   | S.CPS_result -> CPS_result
   | S.Rand _ -> assert false
   | S.Empty -> Empty
+  | S.Dummy _ -> assert false
 
 (** App(Temp e, t) denotes execution of App(t,Unit) after happening the event e *)
 and trans_term post xs env t =
   match t.S.desc with
-  | S.Const(S.Rand _) -> assert false
-  | S.Const c -> [], Const (trans_const c)
-  | S.App({S.desc=S.Const(S.Rand(Type.TBase Type.TInt,false)); S.attr}, [{S.desc=S.Const S.Unit}]) when List.mem S.AAbst_under attr ->
+  | Const(Rand _) -> assert false
+  | Const c -> [], Const (trans_const c)
+  | App({desc=Const(Rand(TBase TInt,false)); attr}, [{desc=Const Unit}]) when List.mem S.AAbst_under attr ->
       unsupported "trans_term RandInt"
-  | S.App({S.desc=S.Const(S.Rand(Type.TBase Type.TInt, true)); S.attr}, [t1;t2]) ->
+  | App({desc=Const(Rand(TBase TInt, true)); attr}, [t1;t2]) ->
       let under = List.mem S.AAbst_under attr in
-      assert (t1.S.desc = S.Const S.Unit);
+      assert (t1.desc = Const Unit);
       let defs2,t2' = trans_term post xs env t2 in
       let xs' = List.filter (fun x -> is_base @@ List.assoc x env) xs in
       let head = Const (Rand(TInt, if under then Some 0 else None)) in
       let args =if under then List.map _Var xs' @ [t2'] else [t2'] in
       defs2, make_app head args
-  | S.App({S.desc=S.Const(S.Rand(Type.TData _s, true))}, [_t1]) ->
+  | App({desc=Const(Rand(Type.TConstr _, true))}, [_t1]) ->
       assert false
   (*
       let defs1,t1' = trans_term post xs env t1 in
       defs1, App(t1', Const (RandVal s))
    *)
-  | S.App({S.desc=S.Const(S.Rand(typ,true))}, [t1;t2]) ->
-      assert (t1.S.desc = S.Const S.Unit);
+  | App({desc=Const(Rand(typ,true))}, [t1;t2]) ->
+      assert (t1.desc = Const Unit);
       let defs2,t2' = trans_term post xs env t2 in
       let base =
         match trans_typ typ with
@@ -276,23 +277,23 @@ and trans_term post xs env t =
         | _ -> assert false
       in
       defs2, App(t2', Const (Rand(base, None)))
-  | S.Var x ->
+  | Var (LId x) ->
       let x' = trans_var x in
       [], Var x'
-  | S.App({S.desc=S.Event(s,false)}, [t]) ->
+  | App({desc=Event(s,false)}, [t]) ->
       let k = new_id "k" in
       assert (t = Term_util.unit_term);
       let defs = [k, TFun(typ_unit, fun _ -> typ_unit), ["u"], Const True, Const Unit] in
       defs, App(Const (Temp s), Var k)
-  | S.App({S.desc=S.Event(s,true)}, [t1;t2]) ->
-      assert (t1.S.desc = S.Const S.Unit);
+  | App({desc=Event(s,true)}, [t1;t2]) ->
+      assert (t1.desc = Const Unit);
       let defs2,t2' = trans_term post xs env t2 in
       defs2, App(Const (Temp s), t2')
-  | S.App(t, ts) ->
+  | App(t, ts) ->
       let defs,t' = trans_term post xs env t in
       let defss,ts' = List.split_map (trans_term post xs env) ts in
       defs @ (List.flatten defss), make_app t' ts'
-  | S.If(t1, {S.typ}, _) when Term_util.is_randbool_unit t1 ->
+  | If(t1, {typ}, _) when Term_util.is_randbool_unit t1 ->
       let ts = decomp_br t in
       let defss,ts' = List.split_map (trans_term post xs env) ts in
       let f = new_id ("br" ^ post) in
@@ -301,13 +302,13 @@ and trans_term post xs env t =
       let typ = List.fold_right aux xs typ0 in
       let defs = List.map (fun t -> f, typ, xs, Const True, t) ts' in
       defs @ List.flatten defss, Term.(var f @ vars xs)
-  | S.If(t1, t2, t3) ->
+  | If(t1, t2, t3) ->
       let defs1,t1' = trans_term post xs env t1 in
       let defs2,t2' = trans_term post xs env t2 in
       let defs3,t3' = trans_term post xs env t3 in
       let f = new_id ("br" ^ post) in
       let x = new_id "b" in
-      let typ0 = trans_typ t2.S.typ in
+      let typ0 = trans_typ t2.typ in
       let aux x typ2 = TFun(List.assoc x env, subst_typ x -$- typ2) in
       let typ = List.fold_right aux xs typ0 in
       let typ' = TFun(typ_bool(), fun _ -> typ) in
@@ -315,50 +316,49 @@ and trans_term post xs env t =
       let def2 = f, typ', x::xs, make_not (Var x), t3' in
       let t = List.fold_left (fun t x -> App(t,Var x)) (App(Var f,t1')) xs in
       def1::def2::defs1@defs2@defs3, t
-  | S.Local _ -> assert false
-  | S.BinOp(S.Eq, t1, t2) ->
+  | Local _ -> assert false
+  | BinOp(Eq, t1, t2) ->
       let defs1,t1' = trans_term post xs env t1 in
       let defs2,t2' = trans_term post xs env t2 in
       let op =
-        match Type.elim_tattr t1.S.typ with
-        | Type.TBase Type.TUnit -> EqUnit
-        | Type.TBase Type.TBool -> EqBool
-        | Type.TBase Type.TInt -> EqInt
-        | Type.TBase (Type.TPrim ty) -> CmpPoly(ty, "=")
-        | Type.TData ty -> CmpPoly(ty, "=")
+        match Type.elim_tattr t1.typ with
+        | TBase TUnit -> EqUnit
+        | TBase TBool -> EqBool
+        | TBase TInt -> EqInt
+        | TConstr(ty,_) -> CmpPoly(TU.string_of_path ty, "=")
         | typ -> Format.eprintf "trans_term: %a@." Print.typ typ; assert false
       in
       defs1@defs2, make_app (Const op) [t1'; t2']
-  | S.BinOp(op, t1, t2) ->
+  | BinOp(op, t1, t2) ->
       let defs1,t1' = trans_term post xs env t1 in
       let defs2,t2' = trans_term post xs env t2 in
       let op' =
-        match t1.S.typ with
-        | Type.TData typ -> Const (CmpPoly(typ, Print.string_of_binop op))
+        match t1.typ with
+        | Type.TConstr(c,_) -> Const (CmpPoly(TU.string_of_path c, Print.string_of_binop op))
         | _ -> trans_binop op
       in
       defs1@defs2, make_app op' [t1'; t2']
-  | S.Not t ->
+  | Not t ->
       let defs,t' = trans_term post xs env t in
       defs, App(Const Not, t')
-  | S.Fun _ -> assert false
-  | S.Event _ -> assert false
-  | S.Bottom -> [], Const Bottom
-  | S.Proj(i, t) ->
+  | Fun _ -> assert false
+  | Event _ -> assert false
+  | Bottom -> [], Const Bottom
+  | Proj(i, t) ->
       let defs,t' = trans_term post xs env t in
-      defs, make_proj (Option.get @@ Type.tuple_num t.S.typ) i t'
-  | S.Tuple ts ->
+      defs, make_proj (Option.get @@ TU.tuple_num t.typ) i t'
+  | Tuple ts ->
       let defss,ts' = List.split_map (trans_term post xs env) ts in
       List.flatten defss, make_tuple ts'
-  | S.MemSet(t1,t2) ->
+  | MemSet(t1,t2) ->
       let defs1,t1' = trans_term post xs env t1 in
       let defs2,t2' = trans_term post xs env t2 in
       defs1@defs2, App(App(Const MemSet, t1'), t2')
-  | S.AddSet(t1,t2) ->
+  | AddSet(t1,t2) ->
       let defs1,t1' = trans_term post xs env t1 in
       let defs2,t2' = trans_term post xs env t2 in
       defs1@defs2, App(App(Const AddSet, t1'), t2')
-  | S.Subset(t1,t2) ->
+  | Subset(t1,t2) ->
       let defs1,t1' = trans_term post xs env t1 in
       let defs2,t2' = trans_term post xs env t2 in
       defs1@defs2, App(App(Const Subset, t1'), t2')
@@ -368,48 +368,47 @@ and trans_term post xs env t =
 
 let rec formula_of t =
   match t.S.desc with
-  | S.Const(S.Rand(Type.TBase Type.TInt,false)) -> raise Not_found
-  | S.Const(S.Rand(Type.TBase Type.TInt,true)) -> assert false
-  | S.Const c -> Const (trans_const c)
-  | S.Var x -> Var (trans_var x)
-  | S.App _ -> raise Not_found
-  | S.If _ -> raise Not_found
-  | S.Local _ -> assert false
-  | S.BinOp(S.Eq, t1, t2) ->
+  | Const(Rand(TBase TInt,false)) -> raise Not_found
+  | Const(Rand(TBase TInt,true)) -> assert false
+  | Const c -> Const (trans_const c)
+  | Var (LId x) -> Var (trans_var x)
+  | App _ -> raise Not_found
+  | If _ -> raise Not_found
+  | Local _ -> assert false
+  | BinOp(Eq, t1, t2) ->
       let t1' = formula_of t1 in
       let t2' = formula_of t2 in
       let op =
         match Type.elim_tattr t1.S.typ with
-        | Type.TBase Type.TUnit -> EqUnit
-        | Type.TBase Type.TBool -> EqBool
-        | Type.TBase Type.TInt -> EqInt
-        | Type.TBase (Type.TPrim ty) -> CmpPoly(ty, "=")
-        | Type.TData ty -> CmpPoly(ty, "=")
+        | TBase TUnit -> EqUnit
+        | TBase TBool -> EqBool
+        | TBase TInt -> EqInt
+        | TConstr(ty,_) -> CmpPoly(TU.string_of_path ty, "=")
         | _ -> Format.eprintf "%a@." Print.typ t1.S.typ; assert false
       in
       make_app (Const op) [t1'; t2']
-  | S.BinOp(op, t1, t2) ->
+  | BinOp(op, t1, t2) ->
       let t1' = formula_of t1 in
       let t2' = formula_of t2 in
       App(App(trans_binop op, t1'), t2')
-  | S.Not t ->
+  | Not t ->
       let t' = formula_of t in
       App(Const Not, t')
-  | S.Proj _ -> raise Not_found
-  | S.Tuple _ -> raise Not_found
-  | S.MemSet(t1,t2) ->
+  | Proj _ -> raise Not_found
+  | Tuple _ -> raise Not_found
+  | MemSet(t1,t2) ->
       let t1' = formula_of t1 in
       let t2' = formula_of t2 in
       App(App(Const MemSet, t1'), t2')
-  | S.AddSet(t1,t2) ->
+  | AddSet(t1,t2) ->
       let t1' = formula_of t1 in
       let t2' = formula_of t2 in
       App(App(Const AddSet, t1'), t2')
-  | S.Subset(t1,t2) ->
+  | Subset(t1,t2) ->
       let t1' = formula_of t1 in
       let t2' = formula_of t2 in
       App(App(Const Subset, t1'), t2')
-  | _ -> Format.eprintf "formula_of: %a@." Print.constr t; assert false
+  | _ -> Format.eprintf "formula_of: %a@." Print.desc_constr t.desc; assert false
 
 let trans_def (f,(xs,t)) =
   let f' = trans_var f in
@@ -613,29 +612,29 @@ module RT = Ref_type
 
 let rec revert_typ ty =
   match ty with
-  | TBase(TUnit, _) -> Type.Ty.unit
-  | TBase(TBool, _) -> Type.Ty.bool
-  | TBase(TInt, _) -> Type.Ty.int
-  | TBase(TAbst s, _) -> Type.TData s
+  | TBase(TUnit, _) -> TU.Ty.unit
+  | TBase(TBool, _) -> TU.Ty.bool
+  | TBase(TInt, _) -> TU.Ty.int
+  | TBase(TAbst s, _) -> TConstr(TU.lid_of_string s,[])
   | TConstr _ -> unsupported "CEGAR_trans.revert_typ: TConstr"
-  | TFun(typ1, typ2) -> Type.TFun(Id.new_var (revert_typ typ1), revert_typ @@ typ2 @@ Const Unit)
+  | TFun(typ1, typ2) -> TFun(Id.new_var (revert_typ typ1), revert_typ @@ typ2 @@ Const Unit)
 
-let rec trans_ref_type = function
-  | CRT.Base(b,x,p) ->
+let rec trans_ref_type : CRT.t -> RT.t = function
+  | Base(b,x,p) ->
       let b' =
         match b with
-        | CRT.Unit -> Type.TUnit
-        | CRT.Bool -> Type.TBool
-        | CRT.Int -> Type.TInt
-        | CRT.Abst s -> Type.TPrim s
+        | Unit -> Type.TUnit
+        | Bool -> TBool
+        | Int -> TInt
+        | Abst _ -> unsupported "%s" __FUNCTION__
       in
-      RT.Base(b', trans_inv_var x, trans_inv_term p)
-  | CRT.Fun(x,typ1,typ2) ->
-      RT.Fun(trans_inv_var x, trans_ref_type typ1, trans_ref_type typ2)
-  | CRT.Inter(typ, typs) ->
+      Base(b', trans_inv_var x, trans_inv_term p)
+  | Fun(x,typ1,typ2) ->
+      Fun(trans_inv_var x, trans_ref_type typ1, trans_ref_type typ2)
+  | Inter(typ, typs) ->
       let typs' = List.map trans_ref_type typs in
       let typ' = revert_typ typ in
-      RT.Inter(typ', typs')
+      Inter(typ', typs')
 
 
 let trans_term = trans_term "" [] []
@@ -652,7 +651,7 @@ let trans_prog {Problem.term=t; attr} =
     |> Lift.lift
   in
   let defs_t,t_main' = trans_term t_main in
-  let is_cps = List.mem Problem.ACPS attr in
+  let is_cps = List.mem Problem.CPS attr in
   let defs' =
     let typ = if is_cps then typ_result else typ_unit in
     (main,typ,[],Const True,t_main') :: defs_t @ List.flatten_map trans_def defs
@@ -690,7 +689,7 @@ let trans_prog {Problem.term=t; attr} =
   let rrmap = List.map Pair.swap rmap in
   let make_get_rtyp get_rtyp f =
     Debug.printf "make_get_rtyp f: %a@." Print.id f;
-    Id.assoc f rrmap
+    Id.List.assoc f rrmap
     |@> Debug.printf "rrmap(f): %a@." CEGAR_print.var
     |> get_rtyp
     |@> Debug.printf "get_rtyp rrmap(f): %a@." CEGAR_ref_type.print
@@ -739,7 +738,7 @@ let rec is_value env = function
   | Fun _ -> assert false
 
 let rec read_bool () =
-  Format.printf "RandBool (t/f/r/s): @?";
+  Format.fprintf !Flag.Print.target "RandBool (t/f/r/s): @?";
   match read_line () with
   | "t" -> true
   | "f" -> false
@@ -787,21 +786,21 @@ let rec step_eval_abst_cbn ce labeled env_abst defs = function
   | _ -> assert false
 
 let rec eval_abst_cbn prog labeled abst ce =
-  Format.printf "Program with abstraction types::@.%a@." CEGAR_print.prog abst;
-  Format.printf "CE: %a@." CEGAR_print.ce ce;
+  Format.fprintf !Flag.Print.target "Program with abstraction types::@.%a@." CEGAR_print.prog abst;
+  Format.fprintf !Flag.Print.target "CE: %a@." CEGAR_print.ce ce;
   let env_orig = prog.env in
   let env_abst = abst.env in
   let defs = abst.defs in
   let main = abst.main in
   let ce' = ce in
   let rec loop ce t =
-    Format.printf "%a -->@\n" CEGAR_print.term t;
+    Format.fprintf !Flag.Print.target "%a -->@\n" CEGAR_print.term t;
     assert (match get_typ env_abst t with TBase(TUnit,_) -> true | _ -> false);
     begin
       try
         match decomp_app t with
           Var x, _ ->
-          Format.printf "  %s:: %a@\n" x CEGAR_print.typ (List.assoc x env_orig)
+          Format.fprintf !Flag.Print.target "  %s:: %a@\n" x CEGAR_print.typ (List.assoc x env_orig)
         | _ -> ()
       with Not_found -> ()
     end;
@@ -810,26 +809,26 @@ let rec eval_abst_cbn prog labeled abst ce =
     loop ce' t'
   in
   let rec confirm () =
-    Format.printf "(s)kip/(r)estart: @?";
+    Format.fprintf !Flag.Print.target "(s)kip/(r)estart: @?";
     match read_line () with
     | "s" -> ()
     | "r" -> eval_abst_cbn prog labeled abst ce
     | _ -> confirm ()
   in
-  Format.printf "Evaluation of abstracted program::@.";
+  Format.fprintf !Flag.Print.target "Evaluation of abstracted program::@.";
   try
     loop ce' (Var main)
   with
   | EvalRestart -> eval_abst_cbn prog labeled abst ce
   | EvalFail ->
-      Format.printf "ERROR!@.@.";
+      Format.fprintf !Flag.Print.target "ERROR!@.@.";
       confirm ()
   | EvalSkip -> ()
   | EvalTerminate ->
-      Format.printf "TERMINATES!@.@.";
+      Format.fprintf !Flag.Print.target "TERMINATES!@.@.";
       confirm ()
   | TypeBottom ->
-      Format.printf "DIVERGES!@.@.";
+      Format.fprintf !Flag.Print.target "DIVERGES!@.@.";
       confirm ()
 
 
@@ -846,19 +845,25 @@ let assoc_def labeled defs ce acc rand_num t =
     let defs' = List.filter (fun {fn=g} -> g = f) defs in
     let aux {body=t} = (* In fair nonterm mode, trans_ce ends just before 'read_int' *)
       rand_num = Some 0 && is_app_read_int t in
-    if List.mem f labeled
-    then
-      if ce = [] then
-        None
-      else
-        let c = List.hd ce in
-        let ce' = List.tl ce in
-        let acc' = c::acc in
-        let def = List.nth defs' c in
-        if aux def then
-          None
-        else
-          Some (ce', acc', def)
+    if List.mem f labeled then
+      match ce with
+      | [] -> None
+      | c::ce' ->
+          let c,ce' =
+            if !Flag.Debug.input_cex then
+              let n = List.length defs' in
+              let s = Format.asprintf "Input branch of %s [0--%d]" f (n-1) in
+              let check x = 0 <= x && x < n in
+              CommandLine.read_int ~check s, ce
+            else
+              c, ce'
+          in
+          let acc' = c::acc in
+          let def = List.nth defs' c in
+          if aux def then
+            None
+          else
+            Some (ce', acc', def)
     else
       let acc' = 0::acc in
       let def = List.hd defs' in
@@ -868,21 +873,21 @@ let assoc_def labeled defs ce acc rand_num t =
       else
         Some(ce, acc', def)
 
-let init_cont _ acc _ _ = List.rev acc
+let init_cont (_, acc, _, _) = List.rev acc
 
 let rec trans_ce_aux labeled ce acc defs rand_num t k =
   Debug.printf "trans_ce_aux[%d,%d]: %a@." (List.length ce) (List.length acc) CEGAR_print.term t;
   match t with
   | Const (Rand(TInt, _)) -> assert false
-  | Const c -> k ce acc rand_num (Const c)
-  | Var x -> k ce acc rand_num (Var x)
+  | Const c -> k (ce, acc, rand_num, Const c)
+  | Var x -> k (ce, acc, rand_num, Var x)
   | App(Const Not, t) ->
-      trans_ce_aux labeled ce acc defs rand_num t (fun ce acc rand_num t ->
-      k ce acc rand_num (make_app (Const Not) [t]))
+      let@ ce,acc,rand_num,t = trans_ce_aux labeled ce acc defs rand_num t in
+      k (ce, acc, rand_num, make_app (Const Not) [t])
   | App(App(Const op,t1),t2) when is_binop op ->
-      trans_ce_aux labeled ce acc defs rand_num t1 (fun ce acc rand_num t1 ->
-      trans_ce_aux labeled ce acc defs rand_num t2 (fun ce acc rand_num t2 ->
-      k ce acc rand_num (make_app (Const op) [t1;t2])))
+      let@ ce,acc,rand_num,t1 = trans_ce_aux labeled ce acc defs rand_num t1 in
+      let@ ce,acc,rand_num,t2 = trans_ce_aux labeled ce acc defs rand_num t2 in
+      k (ce, acc, rand_num, make_app (Const op) [t1;t2])
   | App _ when is_app_randint t ->
       let _,ts = decomp_app t in
       let t' = List.last ts in
@@ -892,31 +897,33 @@ let rec trans_ce_aux labeled ce acc defs rand_num t k =
           Option.map pred rand_num
         else rand_num in
       if rand_num = Some 0 then (* fair non-termination *)
-        init_cont ce acc rand_num' t
+        init_cont (ce, acc, rand_num', t)
       else
         trans_ce_aux labeled ce acc defs rand_num' (App(t', Var r)) k
-  | App(Const (Event "fail"), t) -> init_cont ce acc rand_num t
+  | App(Const (Event "fail"), t) -> init_cont (ce, acc, rand_num, t)
   | App(t1,t2) ->
-      trans_ce_aux labeled ce acc defs rand_num t1 (fun ce acc rand_num t1 ->
-      trans_ce_aux labeled ce acc defs rand_num t2 (fun ce acc rand_num t2 ->
+      let@ ce,acc,rand_num,t1 = trans_ce_aux labeled ce acc defs rand_num t1 in
+      let@ ce,acc,rand_num,t2 = trans_ce_aux labeled ce acc defs rand_num t2 in
       let t1',ts = decomp_app (App(t1,t2)) in
       let {args=xs} = List.find (fun def -> Var def.fn = t1') defs in
       if List.length xs > List.length ts then
-        k ce acc rand_num (App(t1,t2))
+        k (ce, acc, rand_num, App(t1,t2))
       else
-         match assoc_def labeled defs ce acc rand_num t1' with
-          | None ->
-             init_cont ce acc rand_num t1'
+        begin
+          match assoc_def labeled defs ce acc rand_num t1' with
+          | None -> init_cont (ce, acc, rand_num, t1')
           | Some (ce', acc', {args=xs; body=tf2}) ->
-             let ts1,ts2 = List.split_nth (List.length xs) ts in
-             let aux = List.fold_right2 subst xs ts1 in
-             let tf2' = make_app (aux tf2) ts2 in
-             assert (List.length xs = List.length ts);
-             trans_ce_aux labeled ce' acc' defs rand_num tf2' k))
+              let ts1,ts2 = List.split_nth (List.length xs) ts in
+              let aux = List.fold_right2 subst xs ts1 in
+              let tf2' = make_app (aux tf2) ts2 in
+              assert (List.length xs = List.length ts);
+              trans_ce_aux labeled ce' acc' defs rand_num tf2' k
+        end
   | Let _ -> assert false
   | Fun _ -> assert false
 
 let trans_ce labeled {defs; main} ce rand_num =
+  if !Flag.Debug.input_cex then Format.fprintf !Flag.Print.target "Obtained counterexample: %a@." Print.(list int) ce;
   let {body=t} = List.find (fun def -> def.fn = main) defs in
   let ce' = trans_ce_aux labeled ce [] defs rand_num t init_cont in
   assert (not (List.mem main labeled));

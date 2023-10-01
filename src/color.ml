@@ -1,5 +1,4 @@
-
-type color =
+type t =
   | Default
   | Bright
   | Dim
@@ -52,14 +51,9 @@ let color_table =
 let rec init_colors = (List.assoc Default color_table)::init_colors
 let history = ref init_colors
 
-let init () =
-  if Unix.isatty Unix.stdout
-  then ()
-  else Flag.PrettyPrinter.color := false
-
-let print ppf s =
+let print ppf n =
   if !Flag.PrettyPrinter.color || !Flag.PrettyPrinter.color_always
-  then Format.fprintf ppf "\027[%dm" s
+  then Format.pp_print_as ppf 0 @@ "\027[" ^ string_of_int n ^ "m"
 
 let set ppf c =
   try
@@ -73,7 +67,7 @@ let reset ppf =
 
 let fprintf ppf c =
   set ppf c;
-  Format.kfprintf (fun _ -> reset ppf) ppf
+  Format.kfprintf reset ppf
 let printf c = fprintf Format.std_formatter c
 let eprintf c = fprintf Format.err_formatter c
 
@@ -90,3 +84,10 @@ let s_red ppf s = fprintf ppf Red "%s" s
 let s_green ppf s = fprintf ppf Green "%s" s
 let s_cyan ppf s = fprintf ppf Cyan "%s" s
 let s_yellow ppf s = fprintf ppf Yellow "%s" s
+
+let init () =
+  if Unix.isatty Unix.stdout
+  then ()
+  else Flag.PrettyPrinter.color := false
+
+let () = init ()

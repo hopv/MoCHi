@@ -1,89 +1,111 @@
 open Util
+open Type
+open Type_util
 open Syntax
 open Term_util
-open Type
 
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
 
 
 let mutable_record_term =
-  let tr = make_trans2 () in
-  let rec decomp env ty =
+  let tr = Tr2.make () in
+  let rec assoc env ty =
     match ty with
-    | TData s ->
-        let ty =
+    | TConstr(s,[ty1]) when s = C.ref ->
+        let label = label_of_string "contents" in
+        [label, (Mutable, ty1)]
+    | TConstr(s,tys) ->
+        begin
           try
-            List.assoc s env
+            List.assoc ~eq:Path.eq s env
+            |> apply_tconstr -$- tys
+            |> assoc env
           with Not_found ->
-            Format.printf "TData %s@." s;
+            Format.eprintf "TConstr %a@." Print.path s;
+            Format.eprintf "env: %a@." Print.(list (path * (list typ * typ))) env;
             assert false
-        in
-        decomp env ty
+        end
     | TRecord fields -> fields
     | _ -> assert false
   in
-  let tr_pat env p =
+  tr.pat <- (fun env p ->
     match p.pat_desc with
-    | PRecord _ when List.exists (fun (_,(f,_)) -> f = Mutable) @@ decomp env p.pat_typ ->
-        unsupported "Pattern matching for mutable record (tr_pat)"
-    | _ -> tr.tr2_pat_rec env p
-  in
-  let tr_term env t =
+    | PRecord fields ->
+        let tfields = assoc env p.pat_typ in
+        let aux (f,p) =
+          match Id.List.assoc f tfields with
+          | Immutable, _ -> f, tr.pat env p
+          | Mutable, ty ->
+              let p' = tr.pat env p in
+              let ty' = tr.typ env ty in
+              let x = Id.new_var (Ty.ref ty') in
+              let p'' = Pat.eval x Term.(!(var x)) p' in
+              f, p''
+        in
+        let fields' = List.map aux fields in
+        let pat_typ = tr.typ env p.pat_typ in
+        make_pattern (PRecord fields') pat_typ
+    | _ -> tr.pat_rec env p);
+  tr.term <- (fun env t ->
     match t.desc with
     | Record fields ->
-        let aux (s,t) (_,(f,_)) =
-          let t' = tr.tr2_term env t in
-          s, if f = Mutable then Term.ref t' else t'
+        let tys = assoc env t.typ in
+        let fields' =
+          List.L.map2 fields tys
+            ~f:(fun (s,t) (_,(f,_)) ->
+              let t' = tr.term env t in
+              s, if f = Mutable then Term.ref t' else t')
         in
-        let fields' = List.map2 aux fields @@ decomp env t.typ in
-        make_record fields' @@ tr.tr2_typ env t.typ
+        make_record fields' @@ tr.typ env t.typ
     | SetField(t1,s,t2) ->
-        let t1' = tr.tr2_term env t1 in
-        let t2' = tr.tr2_term env t2 in
+        let t1' = tr.term env t1 in
+        let t2' = tr.term env t2 in
         Term.(field ~ty:(Ty.ref t2'.typ) t1' s := t2')
     | Field(t1,s) ->
-        let t1' = tr.tr2_term env t1 in
+        let t1' = tr.term env t1 in
         let f,ty =
           try
-            List.assoc s @@ decomp env t1.typ
+            Id.List.assoc s @@ assoc env t1.typ
           with Not_found ->
             Format.eprintf "t: %a@." Print.term t;
-            Format.eprintf "fields: %a@." Print.(list (string * (__ * typ))) (decomp env t1.typ);
+            Format.eprintf "t1.typ: %a@." Print.typ t1.typ;
+            Format.eprintf "fields: %a@." Print.(list (label * (__ * typ))) (assoc env t1.typ);
             assert false
         in
-        let ty' = tr.tr2_typ env ty in
+        let ty' = tr.typ env ty in
         if f = Mutable then
           Term.(! (field ~ty:(Ty.ref ty') t1' s))
         else
           Term.field ~ty:ty' t1' s
-    | Local(Decl_type decls, _) -> tr.tr2_term_rec (decls@env) t
-    | _ -> tr.tr2_term_rec env t
-  in
-  let tr_typ env typ =
+    | Local(Decl_type decls, _) ->
+        let env' = Fmap.(list (fst Path._LId)) decls @ env in
+        set_afv_shallowly @@ tr.term_rec env' t
+    | _ ->
+        set_afv_shallowly @@ tr.term_rec env t);
+  tr.typ <- (fun env typ ->
     match typ with
     | TRecord fields ->
         let aux (s,(f,typ)) =
-          let typ' = tr.tr2_typ env typ in
+          let typ' = tr.typ env typ in
           let typ'' = if f = Mutable then Ty.ref typ' else typ' in
           s, (Immutable, typ'')
         in
         TRecord (List.map aux fields)
-    | _ -> tr.tr2_typ_rec env typ
-  in
-  tr.tr2_typ <- tr_typ;
-  tr.tr2_term <- tr_term;
-  tr.tr2_pat <- tr_pat;
-  tr.tr2_term []
+    | _ -> tr.typ_rec env typ);
+  tr.term []
+  |@- Debug.printf "ENCODE_MUTABLE_RECORD: @[%a@." Print.term
+  |- Trans.remove_por
+  |- Trans.remove_peval
 
 (* TODO: support records in refinement types *)
 let mutable_record = Problem.map mutable_record_term
 
 
 let abst_ref_term =
-  let tr = make_trans () in
-  let tr_term t =
-    let t' = tr.tr_term_rec t in
+  let tr = Tr.make () in
+  tr.term <- (fun t ->
+    let t' = tr.term_rec t in
     match t'.desc with
     | Ref t1 ->
         Term.ignore t1
@@ -92,25 +114,29 @@ let abst_ref_term =
         Term.(seq t1 (rand t'.typ))
     | SetRef(t1, t2) ->
         Term.(seqs [t1;t2] unit)
-    | _ -> t'
-  in
-  let tr_typ typ =
+    | Match _ ->
+        Trans.trans_match_with_recover_pat_bv ~tr_desc_rec:tr.desc_rec ~tr_typ:tr.typ t
+    | _ -> t');
+  tr.typ <- (fun typ ->
     match typ with
-    | TApp("ref", _) -> Ty.unit
-    | _ -> tr.tr_typ_rec typ
-  in
-  tr.tr_term <- tr_term;
-  tr.tr_typ <- tr_typ;
-  tr.tr_term |- Trans.elim_unused_let |- Trans.inst_randval
+    | TConstr(c, _) when c = C.ref -> Ty.unit
+    | _ -> tr.typ_rec typ);
+  tr.pat <- (fun p ->
+    match p.pat_desc with
+    | PRecord [{name = "contents"}, _] -> (* TODO: Support shadowing *)
+        Pat.nondet @@ tr.typ p.pat_typ
+    | _ -> tr.pat_rec p);
+  tr.term
+  |- set_afv
+  |- Trans.elim_unused_let
+(* |- Trans.inst_randval *)
 
 let abst_ref_ref_typ =
-  let open Ref_type in
-  let f _ rty =
-    match rty with
-    | App("ref", _) -> Some !!Ty.unit
-    | _ -> None
-  in
-  make_trans f
+  Ref_type.make_trans (fun _ rty ->
+      match rty with
+      | Constr(c, _, _, _) when c = C.ref-> Some !!Ref_type.Ty.unit
+      | _ -> None)
+
 let abst_ref =
   Problem.map
     ~tr_ref:abst_ref_ref_typ
@@ -118,47 +144,71 @@ let abst_ref =
 
 
 let array_term =
-  let tr = make_trans () in
-  let tr_desc desc =
+  let tr = Tr.make () in
+  tr.desc <- (fun desc ->
     match desc with
-    | App({desc=Var x}, [t1]) when Id.name x = "Array.of_list" && is_list_literal t1 ->
+    | Var (LId x) when PrimId.is_array_of_list x ->
+        let xs,ty_ret = decomp_tfun (Id.typ x) in
+        let ty_ret =
+          ty_ret
+          |> (ValE'._TConstr |- snd)
+          |> _TConstr C.array
+          |> tr.typ
+        in
+        let x =
+          xs
+          |> List.get
+          |> Id.typ
+          |> tr.typ
+          |> Id.new_var ~name:"xs"
+        in
+        Fun(x, Term.rand ty_ret)
+    | App({desc=Var (LId x)}, [t1]) when PrimId.is_array_of_list x && is_list_literal t1 ->
         let ts =
           t1
           |> decomp_list
           |> Option.get
-          |> List.map tr.tr_term
+          |> List.map tr.term
         in
         let n = List.length ts in
         let i = Id.new_var ~name:"i" Ty.int in
         let ti = make_var i in
-        let ty = tr.tr_typ @@ list_typ t1.typ in
+        let ty = tr.typ @@ list_typ t1.typ in
         let its = List.mapi Pair.pair ts in
-        let r = List.fold_right (fun (j,x) t -> Term.(if_ (ti = int j) x t)) its (Term.bot ty) in
-        Term.(ref (pair (int n)
-                     (fun_ i
-                        (seq (assert_ (int 0 <= ti && ti < int n)) r)))).desc
-    | _ -> tr.tr_desc_rec desc
-  in
-  let tr_typ typ =
+        let r = List.fold_right (fun (j,x) t -> [%term if `ti = int j then `x else `t]) its (Term.bot ty) in
+        [%term ref (int n, fun i -> assert (0 <= `ti && `ti < int n); `r)].desc
+    | Var (LId x) when PrimId.is_list_of_array x ->
+        let xs,ty_ret = decomp_tfun (Id.typ x) in
+        let ty_ret =
+          ty_ret
+          |> (ValE'._TConstr |- snd)
+          |> _TConstr C.list
+          |> tr.typ
+        in
+        let x =
+          xs
+          |> List.get
+          |> Id.typ
+          |> tr.typ
+          |> Id.new_var ~name:"xs"
+        in
+        Fun(x, Term.rand ty_ret)
+    | _ -> tr.desc_rec desc);
+  tr.typ <- (fun typ ->
     match typ with
-    | TApp("array", [ty]) ->
-        let ty' = tr.tr_typ ty in
+    | TConstr(c, [ty]) when c = C.array ->
+        let ty' = tr.typ ty in
         Ty.(ref (int * (fun_ int ty')))
-    | _ -> tr.tr_typ_rec typ
-  in
-  tr.tr_desc <- tr_desc;
-  tr.tr_typ <- tr_typ;
-  tr.tr_term
+    | _ -> tr.typ_rec typ);
+  tr.term
 
 let encode_array_ref_typ =
   let open Ref_type in
-  let aux tr ty =
-    match ty with
-    | App("array", ty') ->
-        Some Ty.(ref (!!int * (fun_ !!int (tr ty'))))
-    | _ -> None
-  in
-  make_trans aux
+  make_trans (fun tr ty ->
+      match ty with
+      | Constr(c, [ty'], _, _) when C.is_array c ->
+          Some Ty.(ref (!!int * (fun_ !!int (tr ty'))))
+      | _ -> None)
 
 let array =
   Problem.map
@@ -168,63 +218,63 @@ let array =
 
 
 let record_term =
-  let tr = make_trans () in
-  let rec tr_typ typ =
+  let tr = Tr.make () in
+  tr.typ <- (fun typ ->
     match typ with
     | TRecord fields ->
-        make_ttuple @@ List.map (fun (_,(f,typ)) -> if f = Mutable then unsupported "mutable record"; tr_typ typ) fields
-    | _ -> tr.tr_typ_rec typ
-  in
-  let tr_pat p =
+        make_ttuple @@ List.map (fun (_,(f,typ)) -> if f = Mutable then unsupported "mutable record"; tr.typ typ) fields
+    | _ -> tr.typ_rec typ);
+  tr.pat <- (fun p ->
     match p.pat_desc with
+    | PRecord [{name = "contents"}, _] -> (* TODO: Support shadowing *)
+        tr.pat_rec p
     | PRecord fields ->
-        let ps = List.map (snd |- tr.tr_pat) fields in
-        let typ = tr.tr_typ p.pat_typ in
-        {pat_desc=PTuple ps; pat_typ=typ}
-    | _ -> tr.tr_pat_rec p
-  in
-  let tr_term t =
+        let ps =
+          ValE'._TRecord p.pat_typ
+          |> List.map (fun (f,(_,ty)) ->
+                 match Id.List.assoc_opt f fields with
+                 | None -> Pat.any @@ tr.typ ty
+                 | Some p -> tr.pat p)
+        in
+        let typ = tr.typ p.pat_typ in
+        make_pattern (PTuple ps) typ
+    | _ -> tr.pat_rec p);
+  tr.term <- (fun t ->
     match t.desc, t.typ with
     | Record fields, _ ->
         if is_mutable_record t.typ then
           unsupported "Mutable records";
-        make_tuple @@ List.map (tr.tr_term -| snd) fields
+        make_tuple @@ List.map (tr.term -| snd) fields
     | Local(Decl_type decls, _), _ ->
-        let tys = List.flatten_map (snd |- get_tdata) decls in
-        let check (s,ty) =
+        let tys = List.concat_map (snd |- snd |- get_tconstr_typ |- List.map (fst |- Path.id_of)) decls in
+        let check (s,(_,ty)) =
           match ty with
           | TRecord _ -> List.mem s tys
           | _ -> false
         in
         if List.exists check decls then unsupported "recursive record types";
-        tr.tr_term_rec t
-    | Field(t,s), _ ->
-        let fields = decomp_trecord t.typ in
-        if is_mutable_record t.typ then
-          unsupported "Mutable records";
-        let t' = tr.tr_term t in
-        make_proj (List.find_pos (fun _ (s',_) -> s = s') fields) t'
+        tr.term_rec t
+    | Field(t1,_), _ when is_mutable_record t1.typ ->
+        unsupported "Mutable records";
+    | Field(t1,s), _ ->
+        let fields = ValE'._TRecord t1.typ in
+        let t1' = tr.term t1 in
+        make_proj (List.find_pos (fun _ (s',_) -> s = s') fields) t1'
     | SetField _, _ -> unsupported "Mutable records"
-    | _ -> tr.tr_term_rec t
-  in
-  tr.tr_term <- tr_term;
-  tr.tr_pat <- tr_pat;
-  tr.tr_typ <- tr_typ;
-  tr.tr_term -| Trans.complete_precord
+    | _ -> tr.term_rec t);
+  tr.term -| Trans.complete_precord
 
 let encode_record_ref_typ =
   let open Ref_type in
-  let aux tr ty =
-    match ty with
-    | Record fields ->
-        let aux (_,(f,typ)) =
-          if f = Mutable then unsupported "mutable record";
-          tr typ
-        in
-        Some (Ty.tuple @@ List.map aux fields)
-    | _ -> None
-  in
-  make_trans aux
+  make_trans (fun tr ty ->
+      match ty with
+      | Record fields ->
+          let aux (_,(f,typ)) =
+            if f = Mutable then unsupported "mutable record";
+            tr typ
+          in
+          Some (Ty.tuple @@ List.map aux fields)
+      | _ -> None)
 
 let record =
   Problem.map
@@ -233,137 +283,207 @@ let record =
 
 
 
-let rec is_simple_variant env typ =
+let rec is_enum_variant env typ =
   match typ with
-  | TVariant(_,labels) -> List.for_all (snd |- (=) []) labels
-  | TData s ->
-      List.assoc_opt s env
-      |> Option.exists (is_simple_variant env)
+  | TVariant(_,rows) ->
+      if List.exists (row_ret |- (<>) None) rows then unsupported "%s" __FUNCTION__;
+      List.for_all (row_args |- (=) []) rows
+  | TConstr(s,_) ->
+      List.assoc_opt ~eq:Path.eq s env
+      |> Option.map snd
+      |> Option.exists (is_enum_variant env)
   | _ -> false
 
 let rec position env c typ =
   match typ with
-  | TVariant(_,labels) -> List.find_pos (fun _ (c',_) -> c = c') labels
-  | TData s when List.mem_assoc s env -> position env c @@ List.assoc s env
+  | TVariant(_,rows) ->
+      begin
+        try
+          rows
+          |> List.sort (Compare.on (row_constr |- Id.name))
+          |> List.find_pos (fun _ row -> Id.(c = row.row_constr))
+        with Not_found ->
+          Format.eprintf {|label "%a" is not found in the type "%a"@.|} Print.label c Print.typ typ;
+          assert false
+      end
+  | TConstr(s,_) when List.mem_assoc ~eq:Path.eq s env -> position env c @@ snd @@ List.assoc ~eq:Path.eq s env
   | _ -> invalid_arg "position"
 
-let simple_variant_term =
-  let tr = make_trans2 () in
-  let tr_typ env typ =
-    if is_simple_variant env typ then
+let enum_variant_term =
+  let tr = Tr2.make () in
+  tr.typ <- (fun env typ ->
+    if is_enum_variant env typ then
       Ty.int
     else
-      tr.tr2_typ_rec env typ
-  in
-  let tr_pat env p =
+      tr.typ_rec env typ);
+  tr.pat <- (fun env p ->
     match p.pat_desc with
-    | PConstr(c, []) when is_simple_variant env p.pat_typ ->
+    | PConstr(_, (LId c), []) when is_enum_variant env p.pat_typ ->
         Pat.int @@ position env c p.pat_typ
-    | _ -> tr.tr2_pat_rec env p
-  in
-  let tr_term env t =
+    | _ -> tr.pat_rec env p);
+  tr.term <- (fun env t ->
     match t.desc with
-    | Constr(c, []) when is_simple_variant env t.typ ->
+    | Constr(_, (LId c), []) when is_enum_variant env t.typ ->
         Term.int @@ position env c t.typ
     | Local(Decl_type decls, _) ->
-        tr.tr2_term_rec (decls@env) t
-    | _ -> tr.tr2_term_rec env t
-  in
-  tr.tr2_term <- tr_term;
-  tr.tr2_pat <- tr_pat;
-  tr.tr2_typ <- tr_typ;
-  tr.tr2_term []
+        let env' = List.map (Pair.map_fst Path._LId) decls @ env in
+        tr.term_rec env' t
+    | _ -> tr.term_rec env t);
+  tr.term []
 
 (* TODO: support variants in refinement types *)
-let simple_variant = Problem.map simple_variant_term
+let enum_variant = Problem.map enum_variant_term
 
 
+let is_nonrec_variant typ =
+  match typ with
+  | TVariant(_,rows) ->
+      if List.exists (row_ret |- (<>) None) rows then unsupported "%s" __FUNCTION__;
+      List.for_all (row_args |- (=) []) rows
+  | _ -> false
+
+(** Assuming that Trans.inline_simple_types is preceded (* non-recursive variants must be inlined *) *)
+let nonrec_variant_term =
+  let tr = Tr.make () in
+  let sort_and_tr_rows rows =
+    let rows' = List.sort (Compare.on (row_constr |- Id.name)) rows in
+    List.map (fun row -> {row with row_args = List.map tr.typ row.row_args}) rows'
+  in
+  tr.typ <- (fun typ ->
+      match typ with
+      | TVariant(VNonPoly, rows) ->
+          rows
+          |> sort_and_tr_rows
+          |> List.map (fun row -> Ty.(bool * tuple row.row_args))
+          |> Ty.tuple
+      | TVariant(VPoly _, _) -> [%invalid_arg]
+      | _ -> tr.typ_rec typ);
+  tr.pat <- (fun p ->
+    match p.pat_desc with
+    | PConstr(_, (LId c), ps) when Type.Is'._TVariant p.pat_typ ->
+        let ps' = List.map tr.pat ps in
+        let ps_rows =
+          Type.ValE'._TVariant p.pat_typ
+          |> snd
+          |> sort_and_tr_rows
+          |> List.map (fun row ->
+              let ty = Ty.tuple row.row_args in
+              if Id.(c = row.row_constr) then
+                Pat.(const Term.tt * tuple ps')
+              else
+                Pat.(const Term.ff * __ ty))
+        in
+        Pat.tuple ps_rows
+    | _ -> tr.pat_rec p);
+  tr.term <- (fun t ->
+    match t.desc with
+    | Constr(_, (LId c), ts) when Type.Is'._TVariant t.typ ->
+        let rows =
+          Type.ValE'._TVariant t.typ
+          |> snd
+          |> sort_and_tr_rows
+        in
+        let pos,_ =
+          Type.ValE'._TVariant t.typ
+          |> snd
+          |> assoc_row_with_pos ~sort:true c
+        in
+        let ts' = List.map tr.term ts in
+        let make i row =
+          if i = pos then
+            Term.(pair tt (tuple ts'))
+          else
+            Term.(pair ff (dummy (Ty.tuple row.row_args)))
+        in
+        Term.tuple @@ List.mapi make rows
+    | Local(Decl_type decls, t1) ->
+        let decls' = Fmap.(list (snd (snd tr.typ_rec))) decls in
+        let t1' = tr.term t1 in
+        let ty = tr.typ t.typ in
+        make ~attr:t.attr (Local(Decl_type decls', t1')) ty
+    | _ -> tr.term_rec t);
+  tr.term
+  |- Trans.null_tuple_to_unit
+  |- Trans.elim_singleton_tuple
+
+(* TODO: support variants in refinement types *)
+let nonrec_variant = Problem.map nonrec_variant_term
+
+
+(* Support only records without type parameters *)
 let abst_rec_record_term =
-  let tr = make_trans2 () in
-  let tr_term recs t =
+  let tr = Tr2.make () in
+  tr.term <- (fun recs t ->
     match t.desc with
     | Local(Decl_type decls, t1) ->
         let recs' =
-          let tys = List.flatten_map (snd |- get_tdata) decls in
-          let check (_,ty) =
-            match ty with
-            | TRecord _ -> List.exists (List.mem -$- tys) @@ get_tdata ty
-            | _ -> false
+          let cs = List.rev_flatten_map (snd |- snd |- get_tconstr_typ |- List.filter_map (fst |- Type.Val._LId)) decls in
+          let check (c,(params,ty)) =
+            if params <> [] then [%unsupported];
+            Type.Is._TRecord ty && Id.List.mem c cs
           in
-          List.map (fun (s,_) -> TData s) @@ List.filter check decls
+          decls
+          |> List.filter check
+          |> List.map (fun (s,_) -> TConstr(LId s,[]))
         in
-        let decls' = List.map (fun (s,ty) -> s, if List.mem (TData s) recs' then Ty.int else ty) decls in
-        let t1' = tr.tr2_term (recs'@recs) t1 in
+        Debug.printf "decls: %a@." Print.(decls) [Decl_type decls];
+        Debug.printf "recs': %a@.@." Print.(list typ) recs';
+        let is_rec s = List.mem ~eq:Type.eq (TConstr(LId s,[])) recs' in
+        let decls' = List.map (fun (s,(_,ty)) -> s, ([], if is_rec s then Ty.int else ty)) decls in
+        let t1' = tr.term (recs'@recs) t1 in
         make_local (Decl_type decls') t1'
-    | Record fields when List.mem t.typ recs ->
+    | Record fields when List.mem ~eq:Type.eq t.typ recs ->
         Flag.Abstract.use "Recursive records";
         let bindings =
           fields
           |> List.map snd
-          |> List.map (tr.tr2_term recs)
+          |> List.map (tr.term recs)
           |> List.map (Pair.add_left new_var_of_term)
         in
         make_lets bindings randint_unit_term
-    | SetField(t1,_,t2) when List.mem t1.typ recs ->
+    | SetField(t1,_,t2) when List.mem ~eq:Type.eq t1.typ recs ->
         Flag.Abstract.use "Recursive records";
-        let t1' = tr.tr2_term recs t1 in
-        let t2' = tr.tr2_term recs t2 in
+        let t1' = tr.term recs t1 in
+        let t2' = tr.term recs t2 in
         make_seq t1' t2'
-    | Field(t1,_) when List.mem t1.typ recs ->
+    | Field(t1,_) when List.mem ~eq:Type.eq t1.typ recs ->
         Flag.Abstract.use "Recursive records";
-        let t1' = tr.tr2_term recs t1 in
-        let ty = tr.tr2_typ recs t.typ in
+        let t1' = tr.term recs t1 in
+        let ty = tr.typ recs t.typ in
         Term.(seq t1' (rand ty))
     | Match(_, pats) ->
         let t1',pats' =
-          match tr.tr2_desc_rec recs t.desc with
+          match tr.desc_rec recs t.desc with
           | Match(t',pats') -> t', pats'
           | _ -> assert false
         in
-        let pats'' =
-          let aux (p1,_) (p2,t) =
-            let make x =
-              let ty = tr.tr2_typ recs @@ Id.typ x in
-              Id.set_typ x ty, make_rand_unit ty
-            in
-            let t' =
-              get_bv_pat p1
-              |> List.unique ~eq:Id.eq
-              |> List.Set.diff ~eq:Id.eq -$- (get_bv_pat p2)
-              |> List.map make
-              |> make_lets -$- t
-            in
-            p2, t'
-          in
-          List.map2 aux pats pats'
-        in
+        let pats'' = List.map2 (fun before after -> Trans.recover_pat_bv ~tr_typ:(tr.typ recs) ~before ~after) pats pats' in
         make_match t1' pats''
-    | _ -> tr.tr2_term_rec recs t
-  in
-  let tr_pat recs p =
+    | _ ->
+        t
+        |> tr.term_rec recs
+        |> set_afv_shallowly);
+  tr.pat <- (fun recs p ->
     match p.pat_desc with
-    | PRecord _ when List.mem p.pat_typ recs -> {pat_desc=PNondet; pat_typ=Ty.int}
-    | _ -> tr.tr2_pat_rec recs p
-  in
-  let tr_typ recs ty =
+    | PRecord _ when List.mem ~eq:Type.eq p.pat_typ recs -> make_pnondet Ty.int
+    | _ -> set_afv_abv_pat @@ tr.pat_rec recs p);
+  tr.typ <- (fun recs ty ->
     if List.mem ty recs then
       Ty.int
     else
-      tr.tr2_typ_rec recs ty
-  in
-  tr.tr2_term <- tr_term;
-  tr.tr2_typ <- tr_typ;
-  tr.tr2_pat <- tr_pat;
-  tr.tr2_term []
+      tr.typ_rec recs ty);
+  Trans.lift_pwhen
+  |- Trans.split_type_decls
+  |- tr.term []
 
 (* TODO: support records in refinement types *)
 let abst_rec_record = Problem.map abst_rec_record_term
 
 
 let abst_poly_comp_term =
-  let tr = make_trans () in
-  let tr_term t =
-    let t' = tr.tr_term_rec t in
+  let tr = Tr.make () in
+  tr.term <- (fun t ->
+    let t' = tr.term_rec t in
     match t'.desc with
     | BinOp((Eq | Lt | Gt | Leq | Geq), t1, t2) ->
         begin
@@ -371,137 +491,155 @@ let abst_poly_comp_term =
           | TBase _ -> t'
           | _ -> Term.(seqs [t1;t2] randb)
         end
-    | _ -> t'
-  in
-  tr.tr_term <- tr_term;
-  tr.tr_term
+    | _ -> t');
+  tr.term
 let abst_poly_comp = Problem.map abst_poly_comp_term
 
 
 let option_term =
-  let tr = make_trans () in
-  let tr_term t =
-    let t' = tr.tr_term_rec t in
+  let tr = Tr.make () in
+  tr.term <- (fun t ->
+    let t' = tr.term_rec t in
     match t'.desc with
-    | TNone -> make_none @@ get_opt_typ t'.typ
-    | TSome t -> make_some t
-    | _ -> t'
-  in
-  let tr_typ ty =
+    | TNone -> make_none_enc @@ get_opt_typ_enc t'.typ
+    | TSome t -> make_some_enc t
+    | _ -> t');
+  tr.typ <- (fun ty ->
     match ty with
-    | TApp("option", [ty']) -> opt_typ @@ tr.tr_typ ty'
-    | _ -> tr.tr_typ_rec ty
-  in
-  let tr_pat p =
-    let p' = tr.tr_pat_rec p in
+    | TConstr(c, [ty']) when C.is_option c -> opt_typ_enc @@ tr.typ ty'
+    | _ -> tr.typ_rec ty);
+  tr.pat <- (fun p ->
+    let p' = tr.pat_rec p in
     match p'.pat_desc with
     | PNone ->
-        let ty = option_typ p.pat_typ in
+        let ty = get_opt_typ_enc p'.pat_typ in
         Pat.(tuple [const none_flag; __ ty])
     | PSome p ->
         Pat.(tuple [const some_flag; p])
-    | _ -> p'
-  in
-  tr.tr_term <- tr_term;
-  tr.tr_typ <- tr_typ;
-  tr.tr_pat <- tr_pat;
-  tr.tr_term
+    | _ -> p');
+  tr.term
 let option = Problem.map option_term
 
 
-
-let ignore_constr_arg =
-  let tr = make_trans2 () in
-  let tr_term (check_constr,check_arg as check) t =
+(** [ignore_constr_arg (check_constr, check_arg)] removes the arguments of constructors that satisfy both of the below:
+    check_constr : condition on constructors
+    check_arg : condition on argument types *)
+let ignore_constr_arg : (bool -> path -> bool) * (typ -> bool) -> term -> term =
+  let tr = Tr2.make () in
+  tr.term <- (fun (check_constr,check_arg as check) t ->
     match t.desc with
-    | Constr(s,ts) when check_constr s ->
+    | Constr(b,s,ts) when check_constr b s ->
         let ts1,ts2 =
           ts
-          |> List.map (tr.tr2_term check)
+          |> List.map (tr.term check)
           |> List.partition (Syntax.typ |- check_arg)
         in
-        let ty = tr.tr2_typ check t.typ in
+        let ty = tr.typ check t.typ in
         Term.(seqs ts1 (constr s ts2 ty))
-    | Match(t, pats) ->
-        let pats' =
-          let aux (p,t) =
-            let p' = tr.tr2_pat check p in
-            let t' = tr.tr2_term check t in
-            let removed_but_used =
-              let (-) = List.Set.diff ~eq:Id.eq in
-              let (&&) = List.Set.inter ~eq:Id.eq in
-              (get_bv_pat p - get_bv_pat p') && get_fv t'
-            in
-            let aux x t =
-              let x' = tr.tr2_var check x in
-              Term.(let_ [x', rand (Id.typ x')] t)
-            in
-            p', List.fold_right aux removed_but_used t'
-          in
-          List.map aux pats
-        in
-        Term.match_ (tr.tr2_term check t) pats'
-    | _ -> tr.tr2_term_rec check t
-  in
-  let tr_typ (check_constr,check_arg as check) ty =
+    | Match _ ->
+        Trans.trans_match_with_recover_pat_bv ~tr_desc_rec:(tr.desc_rec check) ~tr_typ:(tr.typ check) t
+    | _ -> set_afv_shallowly @@ tr.term_rec check t);
+  tr.typ <- (fun (check_constr,check_arg as check) ty ->
     match ty with
-    | TVariant(b, labels) ->
-        let labels' =
-          let aux (s,tys) =
-            let tys' =
-               tys
-               |> List.map (tr.tr2_typ check)
-               |& check_constr s &> List.filter_out check_arg
-            in
-            s, tys'
-          in
-          List.map aux labels
+    | TVariant(kind, rows) ->
+        let rows' =
+          rows
+          |> List.map (fun row ->
+                 if row.row_ret <> None then unsupported "%s" __FUNCTION__;
+                 let b = check_constr (kind <> VNonPoly) (Type.LId row.row_constr) in
+                 let row_args =
+                   row.row_args
+                   |> List.map (tr.typ check)
+                   |&b&> List.filter_out check_arg
+                 in
+                 {row with row_args})
         in
-        TVariant(b, labels')
-    | _ -> tr.tr2_typ_rec check ty
-  in
-  let tr_pat (check_constr,check_arg as check) p =
-    let p' = tr.tr2_pat_rec check p in
-    match p'.pat_desc with
-    | PConstr(s,ps) when check_constr s ->
-        let ps = List.filter_out (fun p -> check_arg p.pat_typ) ps in
-        let pat_desc = PConstr(s, ps) in
-        {p' with pat_desc}
-    | _ -> p'
-  in
-  tr.tr2_term <- tr_term;
-  tr.tr2_typ <- tr_typ;
-  tr.tr2_pat <- tr_pat;
-  tr.tr2_term
+        TVariant(kind, rows')
+    | _ -> tr.typ_rec check ty);
+  tr.pat <- (fun (check_constr,check_arg as check) p ->
+    let p' = tr.pat_rec check p in
+    let desc =
+      match p'.pat_desc with
+      | PConstr(b,s,ps) when check_constr b s ->
+          let ps' = List.filter_out (fun p -> check_arg p.pat_typ) ps in
+          PConstr(b, s, ps')
+      | desc -> desc
+    in
+    make_pattern desc p'.pat_typ);
+  fun ch t -> tr.term ch @@ Trans.make_bind_for_PAlias ~force:true t
 
-let ignore_data_arg = ignore_constr_arg (Fun.const true, Fun.const true)
+let ignore_data_arg = ignore_constr_arg (Fun.const2 true, Fun.const true)
+
+let make_ignore_check rows =
+  let constrs = List.map (Type.row_constr |- Path._LId) rows in
+  fun _poly p -> List.mem ~eq:Path.eq p constrs
 
 let ignore_exn_arg t =
   match find_exn_typ t with
-  | None -> t
-  | Some ty_exn ->
-      match ty_exn with
-      | TVariant(_,labels) ->
-          let constrs = List.map fst labels in
-          ignore_constr_arg (List.mem -$- constrs, Fun.const true) t
-      | _ -> t
-
+  | Some (TVariant(_,rows)) -> ignore_constr_arg (make_ignore_check rows, Fun.const true) t
+  | _ -> t
 
 let ignore_exn_fun_arg t =
   match find_exn_typ t with
-  | None -> t
-  | Some ty_exn ->
-      match ty_exn with
-      | TVariant(_,labels) ->
-          let constrs = List.map fst labels in
-          ignore_constr_arg (List.mem -$- constrs, is_fun_typ) t
-      | _ -> t
+  | Some (TVariant(_,rows)) -> ignore_constr_arg (make_ignore_check rows, is_fun_typ) t
+  | _ -> t
+
+let ignore_rec_exn_arg t =
+  match find_exn_typ t with
+  | Some (TVariant(_,rows)) -> ignore_constr_arg (make_ignore_check rows, Type.eq Ty.exn) t
+  | _ -> t
+
+let lazy_term =
+  let tr = Tr.make () in
+  tr.term <- (fun t ->
+    match t.desc with
+    | Lazy t1 -> Term.fun_ (Id.new_var Ty.unit) @@ tr.term t1
+    | _ -> tr.term_rec t);
+  tr.typ <- (fun ty ->
+    match ty with
+    | TConstr(c, [ty]) when c = C.lazy_ ->
+        let ty' = tr.typ ty in
+        Ty.(fun_ unit ty')
+    | _ -> tr.typ_rec ty);
+  tr.term
+let lazy_ = Problem.map lazy_term
 
 
+let abst_obj_term =
+  let tr = Tr.make () in
+  let tr_typ ty =
+    match ty with
+    | TConstr(c, []) when C.is_obj c -> Ty.int
+    | _ -> tr.typ_rec ty
+  in
+  tr.typ <- tr_typ;
+  tr.term
+let abst_obj = Problem.map abst_obj_term
 
+
+let ignore_mutual_data_arg t =
+  let cs =
+    t
+    |> Trans.split_type_decls
+    |> col_type_decl
+    |> List.filter (List.length |- (<=) 2)
+    |> List.flatten_map (List.flatten_map (fun (_,(_,ty)) ->
+                           match ty with
+                           | TVariant(VNonPoly, labels) -> List.map row_constr labels
+                           | _ -> []))
+  in
+  let check_constr _ (s : path) =
+    match s with
+    | LId c -> Id.List.mem c cs
+    | _ -> false
+  in
+  t
+  |> ignore_constr_arg (check_constr, Fun.const true)
+  |> Trans.split_type_decls
+
+(** Assuming that [nonrec_variant] is preceded? *)
 let recdata p =
-  let open Flag.Encode.RecData in
-  match !dest with
+  match !Flag.Encode.RecData.dest with
   | Tuple -> Encode_rec.trans p
   | Variant -> Encode_rec_variant.trans p
 let list = Encode_list.trans
@@ -523,8 +661,14 @@ let all t =
   |@!Flag.Abstract.ignore_exn_arg&> pr "IGNORE_EXN_ARG"
   |> Problem.map ignore_exn_fun_arg
   |@> pr "IGNORE_EXN_FUN_ARG"
-  |&Flag.Encode.RecData.(!dest <> Variant)&> simple_variant
-  |@Flag.Encode.RecData.(!dest <> Variant)&> pr "SIMPLE_VARIANT"
+  |> Problem.map ignore_mutual_data_arg
+  |@> pr "IGNORE_MUTUAL_DATA_ARG"
+  |&Flag.Encode.RecData.(!dest <> Variant)&> enum_variant
+  |@Flag.Encode.RecData.(!dest <> Variant)&> pr "ENUM_VARIANT"
+  |> lazy_
+  |@> pr "LAZY"
+  |> nonrec_variant
+  |@> pr "NONREC_VARIANT"
   |> recdata
   |@> pr "RECDATA"
   |> option
@@ -535,6 +679,8 @@ let all t =
   |@> pr "ARRAY"
   |> abst_ref
   |@> pr "ABST_REF"
+  |> abst_obj
+  |@> pr "ABST_OBJ"
 
 
 let typ_of f typ =

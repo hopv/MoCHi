@@ -1,16 +1,18 @@
 open Util
+open Type
+open Type_util
 open Syntax
 open Term_util
 
 
-module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
+module Dbg = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
 
 
 type program =
   {fun_typ_env : Ref_type.env;
    fun_typ_neg_env : Ref_type.neg_env;
    fun_def_env : (id * term) list;
-   exn_decl : (string * typ list) list}
+   exn_decl : term Type.row list}
 
 type label = int
 type ce = (label * bool) list
@@ -35,7 +37,7 @@ let compose_id ?nid ?arg orig =
   let name = Id.to_string orig in
   let nid' = Option.map_default ((^) ":" -| string_of_int) "" nid in
   let arg' = Option.map_default ((^) "@" -| string_of_int) "" arg in
-  Id.make 0 (Format.sprintf "%s%s%s" name nid' arg') [] (Id.typ orig)
+  Id.make (Format.sprintf "%s%s%s" name nid' arg') (Id.typ orig)
 
 let decomp_id x =
   let s = Id.to_string x in
@@ -70,48 +72,55 @@ let rec is_simple_term t =
   | Tuple ts -> List.for_all is_simple_term ts
   | _ -> is_randint_unit t || is_randbool_unit t
 
-let inline_simple_fun = make_trans2 ()
+let inline_simple_fun = Tr2.make ()
 let inline_simple_fun_desc env desc =
   match desc with
   | Local(Decl_let bindings, t) ->
-      let bindings' = List.map (Pair.map_snd @@ inline_simple_fun.tr2_term env) bindings in
+      let bindings' = List.map (Pair.map_snd @@ inline_simple_fun.term env) bindings in
       let env' = List.filter (snd |- is_simple_term) bindings' @ env in
-      Local(Decl_let bindings', inline_simple_fun.tr2_term env' t)
-  | App({desc=Var f}, ts) when List.exists (fun (g,t) -> Id.(g = f) && List.length (fst @@ decomp_funs t) = List.length ts) env && List.for_all is_simple_term ts ->
+      Local(Decl_let bindings', inline_simple_fun.term env' t)
+  | App({desc=Var (LId f)}, ts) when List.exists (fun (g,t) -> Id.(g = f) && List.length (fst @@ decomp_funs t) = List.length ts) env && List.for_all is_simple_term ts ->
       let _,t = List.find (fst |- Id.same f) env in
       let xs,t' = decomp_funs t in
       (List.fold_right2 subst xs ts t').desc
-  | _ -> inline_simple_fun.tr2_desc_rec env desc
-let () = inline_simple_fun.tr2_desc <- inline_simple_fun_desc
-let inline_simple_fun t = inline_simple_fun.tr2_term [] t
+  | _ -> inline_simple_fun.desc_rec env desc
+let () = inline_simple_fun.desc <- inline_simple_fun_desc
+let inline_simple_fun t = inline_simple_fun.term [] t
+
+let debug s t =
+  if !!Dbg.check then
+    begin
+      Dbg.printf "%s: %a@.@." s Print.term t;
+      Check.assert_check_afv t
+    end
 
 let normalize add_id t =
   t
-  |@> Debug.printf "NORMALIZE0: %a@.@." Print.term
+  |@> debug "NORMALIZE0"
   |> Trans.replace_bottom_def
-  |@> Debug.printf "NORMALIZE1: %a@.@." Print.term
+  |@> debug "NORMALIZE1"
   |> Trans.short_circuit_eval
-  |@> Debug.printf "NORMALIZE2: %a@.@." Print.term
+  |@> debug "NORMALIZE2"
   |> Trans.normalize_let ~is_atom:is_atom
-  |@> Debug.printf "NORMALIZE3: %a@.@." Print.term
+  |@> debug "NORMALIZE3"
   |> Trans.flatten_let
-  |@> Debug.printf "NORMALIZE4: %a@.@." Print.term
+  |@> debug "NORMALIZE4"
   |> Trans.remove_no_effect_trywith
-  |@> Debug.printf "NORMALIZE5: %a@.@." Print.term
+  |@> debug "NORMALIZE5"
   |> inline_simple_fun
-  |@> Debug.printf "NORMALIZE6: %a@.@." Print.term
+  |@> debug "NORMALIZE6"
   |> fixed_point ~eq:same_term
        (Trans.inline_var
-        |@- Debug.printf "NORMALIZE6.1: %a@.@." Print.term
+        |@- debug "NORMALIZE6.1"
         |- Trans.inline_simple_exp
-        |@- Debug.printf "NORMALIZE6.2: %a@.@." Print.term
+        |@- debug "NORMALIZE6.2"
         |- Trans.bool_eta_reduce
-        |@- Debug.printf "NORMALIZE6.3: %a@.@." Print.term
+        |@- debug "NORMALIZE6.3"
         |- Trans.reconstruct
-        |@- Debug.printf "NORMALIZE6.4: %a@.@." Print.term
+        |@- debug "NORMALIZE6.4"
         |- Trans.elim_unused_let ~leave_last:true
-        |@- Debug.printf "NORMALIZE6.5: %a@.@." Print.term)
-  |@> Debug.printf "NORMALIZE7: %a@.@." Print.term
+        |@- debug "NORMALIZE6.5")
+  |@> debug "NORMALIZE7"
   |> Trans.add_id_if (function {desc=If _} -> add_id | _ -> false)
   |> snd
   |> Trans.reconstruct
@@ -122,13 +131,13 @@ let used_by f prog =
   let rec aux acc rest =
     match rest with
     | [] -> acc
-    | f::rest' when Id.mem f acc -> aux acc rest'
+    | f::rest' when Id.List.mem f acc -> aux acc rest'
     | f::rest' ->
-        let xs,t = decomp_funs @@ Id.assoc f prog.fun_def_env in
+        let xs,t = decomp_funs @@ Id.List.assoc f prog.fun_def_env in
         aux (f::acc) (List.Set.diff ~eq:Id.eq (get_fv t) (f::xs) @ rest')
   in
   let fs = List.unique ~eq:Id.eq @@ aux [] [f] in
-  if Id.mem f @@ get_fv @@ snd @@ decomp_funs @@ Id.assoc f prog.fun_def_env then
+  if Id.List.mem f @@ get_fv @@ snd @@ decomp_funs @@ Id.List.assoc f prog.fun_def_env then
     fs
   else
     List.filter_out (Id.same f) fs
@@ -140,7 +149,6 @@ let term_of_prog prog =
   |> make_var
   |> make_lets prog.fun_def_env
 
-
 let take_funs_of_depth env f depth =
   let rec aux acc fs depth =
     if depth <= 0 then
@@ -148,7 +156,7 @@ let take_funs_of_depth env f depth =
     else
       let fs' =
         let aux g =
-          let xs,t = decomp_funs @@ Id.assoc g env in
+          let xs,t = decomp_funs @@ Id.List.assoc g env in
           List.Set.diff ~eq:Id.eq (get_fv t) (g::xs)
         in
         fs
@@ -158,3 +166,9 @@ let take_funs_of_depth env f depth =
       aux (fs@acc) fs' (depth-1)
   in
   aux [] [f] depth
+
+let make_etyp prog =
+  let row_constr = constr_of_string "Assert_failure" in
+  let row = {row_constr; row_args=[]; row_ret=None} in
+  let rows = prog.exn_decl @ [row] in
+  row_constr, TVariant(VNonPoly, rows)

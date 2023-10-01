@@ -17,8 +17,6 @@ rule token = parse
 | "(*"
     { comment lexbuf;
       token lexbuf }
-| '{' { LBRACE }
-| '}' { RBRACE }
 | '(' { LPAREN }
 | ')' { RPAREN }
 | '[' { LSQUAR }
@@ -41,13 +39,11 @@ rule token = parse
 | "bool" { TBOOL }
 | "int" { TINT }
 | "->" { ARROW }
-| "=>" { DARROW }
 | ';' { SEMI }
 | ";;" { SEMISEMI }
 | ':' { COLON }
 | "Main:" { MAIN }
 | "Types:" { TYPES }
-| "when" { WHEN }
 | "rand_int" { RANDINT }
 | "end" { END }
 | digit+

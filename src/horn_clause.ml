@@ -1,7 +1,8 @@
 open Util
+open! Type
 open Syntax
+open Type_util
 open Term_util
-open Type
 
 type t = {head : term; body : term list}
 type horn_clauses = t list
@@ -10,17 +11,17 @@ type pred_var = int
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
 
-let pred_var = Id.make (-1) "v" [] Ty.int
+let pred_var = Id.make ~id:(-1) "v" Ty.int
 let pred_var_term = make_var pred_var
-let make_pred_var p ts =
+let make_pred_var id ts =
   let typs = List.map Syntax.typ ts in
   let typ = List.fold_right make_tfun typs Ty.bool in
-  Id.make p PredVar.pvar_name [Id.Predicate] typ
+  Id.make ~id PredVar.pvar_name ~attr:[Id.Predicate] typ
 let is_pred_var = PredVar.is_pvar
 let get_pred_id = Id.id
 let get_pred_id_of_term t =
   match t.desc with
-  | App({desc=Var x}, _) -> assert (is_pred_var x); Some (get_pred_id x)
+  | App({desc=Var (LId x)}, _) -> assert (is_pred_var x); Some (get_pred_id x)
   | _ -> None
 
 let print fm {head;body} =
@@ -36,7 +37,7 @@ let print fm {head;body} =
   in
   let pr fm t =
     match t.desc with
-    | Var p when is_pred_var p -> Format.fprintf fm "%a()" pr_aux t
+    | Var (LId p) when is_pred_var p -> Format.fprintf fm "%a()" pr_aux t
     | App(p, ts) -> Format.fprintf fm "@[%a(%a)@]" pr_aux p (print_list pr_aux ", ") ts
     | _ -> pr_aux fm t
   in
@@ -58,7 +59,7 @@ let get_pred_ids_hcs hcs =
 
 let decomp_pred_app t =
   match t.desc with
-  | App({desc=Var p}, ts) when is_pred_var p -> Some (p, ts)
+  | App({desc=Var (LId p)}, ts) when is_pred_var p -> Some (p, ts)
   | _ -> None
 
 let inline need hcs =
@@ -67,7 +68,7 @@ let inline need hcs =
       match decomp_pred_app head with
       | None -> false
       | Some (p,_) ->
-          let aux {head} = not @@ Id.mem p @@ get_fv head in
+          let aux {head} = not @@ Id.List.mem p @@ get_fv head in
           is_pred_var p &&
           not @@ List.mem (get_pred_id p) need &&
           List.for_all aux hcs1 &&
@@ -86,7 +87,7 @@ let inline need hcs =
   let replace env t =
     try
       let p,ts = Option.get @@ decomp_pred_app t in
-      let ts',body = Id.assoc p env in
+      let ts',body = Id.List.assoc p env in
       List.map2 make_eq ts ts' @ body
     with _ -> [t]
   in
@@ -94,7 +95,7 @@ let inline need hcs =
     let rec aux env_acc env_rest =
       match env_rest with
       | [] -> env_acc
-      | (p,(ts,body))::env_rest' when List.exists (Id.mem_assoc -$- env) @@ List.flatten_map get_fv body ->
+      | (p,(ts,body))::env_rest' when List.exists (Id.List.mem_assoc -$- env) @@ List.flatten_map get_fv body ->
           let body' = List.flatten_map (replace (env_rest@@@env_acc)) body in
           aux env_acc ((p,(ts,body'))::env_rest')
       | x::env_rest' ->
@@ -111,7 +112,7 @@ let normalize hcs =
     | None -> {head;body}
     | Some(p, args) ->
         let aux arg (args,body) =
-          if is_var arg then
+          if Is._Var arg then
             arg::args, body
           else
             let x = new_var_of_term arg in
@@ -153,7 +154,7 @@ let inline need hcs =
     | Some(p,_) ->
         ids = [] &&
           not @@ List.mem (get_pred_id p) need &&
-            not @@ Id.mem p has_multi_rule
+            not @@ Id.List.mem p has_multi_rule
   in
   let can_inline =
     let check i ({head},ids) =
@@ -184,7 +185,7 @@ let inline need hcs =
             Debug.printf "p: %a@." Id.print p;
             Debug.printf "p': %a@." Id.print p';
             if Id.(p = p') then
-              let args'' = List.map (Option.get -| decomp_var) args in
+              let args'' = List.map (Lid.id_of -| ValE._Var) args in
               Debug.printf "args'': %a@." (List.print Id.print) args'';
               Debug.printf "args': %a@." (List.print Print.term) args';
               List.map (List.fold_right2 subst args'' args') body

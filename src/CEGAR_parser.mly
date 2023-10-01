@@ -10,7 +10,7 @@ let print_error_information () =
   let en = Parsing.symbol_end_pos () in
 *)
 
-  Format.printf "File \"%s\", line %d, characters %d-:\n"
+  Format.eprintf "File \"%s\", line %d, characters %d-:\n"
     st.Lexing.pos_fname
     st.Lexing.pos_lnum
     (st.Lexing.pos_cnum - st.Lexing.pos_bol)
@@ -21,14 +21,11 @@ let parse_error _ = print_error_information ()
 
 %token <string> IDENT
 %token <int> INT
-%token LBRACE
-%token RBRACE
 %token LPAREN
 %token RPAREN
 %token LSQUAR
 %token RSQUAR
 %token ARROW
-%token DARROW
 %token SEMI
 %token SEMISEMI
 %token COLON
@@ -49,7 +46,6 @@ let parse_error _ = print_error_information ()
 %token TIMES
 %token MAIN
 %token TYPES
-%token WHEN
 %token TRUE
 %token FALSE
 %token RANDINT
@@ -60,7 +56,6 @@ let parse_error _ = print_error_information ()
 %right ARROW
 %left OR
 %left AND
-%nonassoc NOT
 %nonassoc EQUAL LTHAN GTHAN LEQ GEQ
 %left PLUS MINUS
 %left TIMES
@@ -73,41 +68,41 @@ let parse_error _ = print_error_information ()
 %%
 
 prog:
-  MAIN id defs TYPES env EOF { {main=$2; defs=$3; env=$5; info=init_info} }
+| MAIN
+  main=id
+  defs=defs
+  TYPES
+  env=env
+  EOF
+  { {main; defs; env; info=init_info} }
 
 defs:
-| def
-  {[$1]}
-| def defs
-  {$1 :: $2}
+| def=def
+  {[def]}
+| def=def defs=defs
+  {def::defs}
 
 def:
-| id id_list ARROW term SEMISEMI
-  {{fn=$1; args=$2; cond=Const True; body=$4}}
+| fn=id args=id_list ARROW body=term SEMISEMI
+  {{fn; args; cond=Const True; body}}
 
 id:
-| IDENT { $1 }
+| x=IDENT { x }
 
 id_list:
   { [] }
-| id id_list
-  { $1::$2 }
-
-event:
-| LBRACE id RBRACE DARROW
-  { Event $2 }
+| x=id xs=id_list
+  { x::xs }
 
 simple_term:
-| LPAREN term RPAREN
-  { $2 }
+| LPAREN t=term RPAREN
+  { t }
 | LPAREN RPAREN
   { Const Unit }
-| LPAREN exp RPAREN
-  { $2 }
-| id
-  { Var $1 }
-| INT
-  { make_int $1 }
+| x=id
+  { Var x }
+| n=INT
+  { make_int n }
 | TRUE
   { Const True }
 | FALSE
@@ -118,53 +113,45 @@ simple_term:
   { Const CPS_result }
 
 term:
-| simple_term
-  { $1 }
-| term simple_term
-  { App($1, $2) }
-
-exp:
-  id
-  { Var $1 }
-| LPAREN exp RPAREN
-  { $2 }
-| INT
-  { make_int $1 }
-| MINUS exp
+| t=simple_term
+  { t }
+| t=simple_term ts=nonempty_list(simple_term)
+  { make_app t ts }
+| MINUS t=simple_term
   {
-    match $2 with
+    match t with
     | Const (Int n) -> make_int (-n)
     | Var x -> make_mul (make_int (-1)) (Var x)
     | t -> make_sub (make_int 0) t
   }
-| exp EQUAL exp
-  { make_eq_int $1 $3 }
-| exp LTHAN exp
-  { make_lt $1 $3 }
-| exp GTHAN exp
-  { make_gt $1 $3 }
-| exp LEQ exp
-  { make_leq $1 $3 }
-| exp GEQ exp
-  { make_geq $1 $3 }
-| exp AND exp
-  { make_and $1 $3 }
-| exp OR exp
-  { make_or $1 $3 }
-| exp PLUS exp
-  { make_add $1 $3 }
-| exp MINUS exp
-  { make_sub $1 $3 }
-| exp TIMES exp
-  { make_sub $1 $3 }
-| NOT exp
-  { make_not $2 }
+| t1=term EQUAL t2=term
+  { make_eq_int t1 t2 }
+| t1=term LTHAN t2=term
+  { make_lt t1 t2 }
+| t1=term GTHAN t2=term
+  { make_gt t1 t2 }
+| t1=term LEQ t2=term
+  { make_leq t1 t2 }
+| t1=term GEQ t2=term
+  { make_geq t1 t2 }
+| t1=term AND t2=term
+  { make_and t1 t2 }
+| t1=term OR t2=term
+  { make_or t1 t2 }
+| t1=term PLUS t2=term
+  { make_add t1 t2 }
+| t1=term MINUS t2=term
+  { make_sub t1 t2 }
+| t1=term TIMES t2=term
+  { make_sub t1 t2 }
+| NOT t=simple_term
+  { make_not t }
 
 
 env:
   {[]}
-| id COLON typ env
-  { ($1,$3)::$4 }
+| x=id COLON ty=typ env=env
+  { (x,ty)::env }
 
 base_type:
 | TUNIT { typ_unit }
@@ -172,39 +159,29 @@ base_type:
 | TINT { typ_int }
 
 simple_type:
-| base_type { $1 }
+| ty=base_type { ty }
 | TRESULT { typ_result }
-| base_type LSQUAR pred_list RSQUAR
-  {
-    let typ = $1 in
-    let preds = $3 in
-    TBase(get_base typ, fun _ -> preds)
-  }
+| typ=base_type LSQUAR preds=pred_list RSQUAR
+  { TBase(get_base typ, fun _ -> preds) }
 
 id_simple_type:
-| id COLON base_type { $1, $3 }
-| id COLON base_type LSQUAR pred_list RSQUAR
-  {
-    let x = $1 in
-    let typ = $3 in
-    let preds = $5 in
-    x, TBase(get_base typ, fun y -> List.map (subst x y) preds)
-  }
+| x=id COLON ty=base_type { x, ty }
+| x=id COLON typ=base_type LSQUAR preds=pred_list RSQUAR
+  { x, TBase(get_base typ, fun y -> List.map (subst x y) preds) }
 
 typ:
-| LPAREN typ RPAREN { $2 }
-| simple_type { $1 }
-| typ ARROW typ { TFun($1, fun _ -> $3) }
-| id_simple_type ARROW typ
+| LPAREN ty=typ RPAREN { ty }
+| ty=simple_type { ty }
+| ty1=typ ARROW ty2=typ { TFun(ty1, fun _ -> ty2) }
+| xty=id_simple_type ARROW ty2=typ
   {
-    let x, typ1 = $1 in
-    let typ2 = $3 in
-    TFun(typ1, fun y -> subst_typ x y typ2)
+    let x,typ1 = xty in
+    TFun(typ1, fun y -> subst_typ x y ty2)
   }
 
 pred_list:
   { [] }
-| exp
-  { [$1] }
-| exp SEMI pred_list
-  { $1::$3 }
+| t=term
+  { [t] }
+| t=term SEMI ts=pred_list
+  { t::ts }

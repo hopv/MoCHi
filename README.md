@@ -1,3 +1,7 @@
+MoCHi is a software model checker for OCaml.
+MoCHi is based on higher-order model checking, predicate abstraction, and CEGAR.
+
+
 How to build MoCHi
 ==================
 
@@ -8,43 +12,34 @@ How to build MoCHi
 What do you need?
 =================
 
-- OCaml 4.09, 4.10, or 4.11
-- Tools/Libraries available via opam 2
-  (Run "opam install z3 dune batteries ocamlfind ppx_deriving yojson camlp5 zarith apron menhir")
-    - Z3 4.8.9
-    - dune 2.5
-    - batteries 3.0.0
+- OCaml >=4.08.0 & <5.0.0
+- opam >=2.1
+- Git
+- Tools/Libraries available via opam
+  (Run "opam install . --deps-only -y")
+    - Z3 >=4.8.9
+    - dune >=2.5.1
+    - batteries >=3.4.0
     - ocamlfind/findlib
     - ppx_deriving
     - Yojson
     - camlp5
-    - zarith
-    - apron
     - Menhir
+    - smtlib-utils >=0.3.1
+    - csisat
+    - Fpat
+    - atp
 - HorSat2 binary (https://github.com/hopv/horsat2)
-- HoIce binary (https://github.com/hopv/hoice)
-    - HoIce is not necessary to run MoCHi, but the lack of HoIce may degrade the performance. (See [Sato+ PEPM2019])
-
-Dockerfile
-==========
-
- There is a Dockerfile for compiling MoCHi.
- Dockerfile assumes the HorSat2 binary is in the same directory.
 
 
 Licenses
 ========
 
- This software is licensed under the Apache License, Version2.0 (http://www.apache.org/licenses/LICENSE-2.0.txt).
-
- The software uses the following libraries/tools.
- Please also confirm each license of the library/tool.
-- CSIsat (https://github.com/dzufferey/csisat)
-- ATP (http://www.cl.cam.ac.uk/~jrh13/atp/)
+ This software is licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0.txt).
 
 
 Author
-=======
+======
 
  MoCHi is developed/maintained by Ryosuke SATO <rsato@is.s.u-tokyo.ac.jp>
 
@@ -52,6 +47,7 @@ Author
 Contributors
 ============
 
+- Naoki Kobayashi
 - Hiroshi Unno
 - Takuya Kuwahara
 - Keiichi Watanabe

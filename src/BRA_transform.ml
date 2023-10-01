@@ -3,6 +3,7 @@ open Mochi_util
 open BRA_util
 open Type
 open Syntax
+open Type_util
 open Term_util
 open BRA_types
 open BRA_state
@@ -33,9 +34,7 @@ let rec everywhere_expr f {desc = desc; typ = typ} =
 	| Match (e, mclauses) -> Match (ev e, List.map (fun (p, t2) -> (p, ev t2)) mclauses)
 	| e -> e
     end
-  in f { desc = expr
-       ; typ = typ
-       ; attr = []}
+  in f (make expr typ)
 
 (* conversion to parse-able string *)
 let parens s = "(" ^ s ^ ")"
@@ -68,8 +67,9 @@ and show_desc top = function
   | Const False -> "false"
   | Const (Int n) -> parens (string_of_int n)
   | App ({desc=Const(Rand(TBase TInt,_))}, _) -> "Random.int 0"
-  | App ({desc=Var {Id.name = div}}, [n; m]) when div = "Pervasives./" -> parens (show_term n ^ " / " ^ show_term m)
-  | Var v -> modify_id_typ v
+  | App ({desc=Var (LId {name = div})}, [n; m]) when div = "Pervasives./" -> parens (show_term n ^ " / " ^ show_term m)
+  | Var (LId v) -> modify_id_typ v
+  | Var _ -> unsupported "%s" __FUNCTION__
   | Fun (f, body) -> "fun " ^ modify_id f ^ " -> " ^ show_term body
   | App ({desc=Event("fail", _)}, _) -> "assert false"
   | App (f, args) -> show_term f ^ List.fold_left (fun acc a -> acc ^ " " ^ parens (show_term a)) "" args
@@ -112,14 +112,15 @@ let restore_ids =
       let name = String.sub name_ 0 i in
       let id = int_of_string (String.sub name_ (i+1) (String.length name_ - i - 1)) in
       let attr = [] in
-      Id.make id name attr typ
+      Id.make ~id name ~attr typ
     with _ -> orig
   in
   let sub = function
     | {desc = Local(Decl_let bindings, cont); typ = t} ->
-      {desc = Local(Decl_let (List.map (fun (f, body) -> (trans_id f, body)) bindings), cont); typ = t; attr=[]}
-    | {desc = Fun (f, body); typ = t} -> {desc = Fun (trans_id f, body); typ = t; attr=[]}
-    | {desc = Var v; typ = t} -> {desc = Var (trans_id v); typ = t; attr=[]}
+      make (Local(Decl_let (List.map (fun (f, body) -> (trans_id f, body)) bindings), cont)) t
+    | {desc = Fun (f, body); typ = t} -> make (Fun (trans_id f, body)) t
+    | {desc = Var (LId v); typ = t} -> make (Var (LId (trans_id v))) t
+    | {desc = Var _} -> unsupported "%s" __FUNCTION__
     | t -> t
   in everywhere_expr sub
 
@@ -132,7 +133,7 @@ let retyping t type_of_state  =
              |> Lexing.from_string
   in
   let () = lb.Lexing.lex_curr_p <-
-    {Lexing.pos_fname = Filename.basename !!Flag.Input.main;
+    {Lexing.pos_fname = Filename.basename !!Flag.IO.main;
      Lexing.pos_lnum = 1;
      Lexing.pos_cnum = 0;
      Lexing.pos_bol = 0};
@@ -163,8 +164,10 @@ let rec transform_function_definitions f term =
     if args <> [] then f binding else binding
   in
   match term with
-    | {desc = Local(Decl_let bindings, cont)} as t -> { t with desc = Local(Decl_let (List.map sub bindings), transform_function_definitions f cont) }
-    | t -> t
+  | {desc = Local(Decl_let bindings, cont)} as t ->
+      let desc = Local(Decl_let (List.map sub bindings), transform_function_definitions f cont) in
+      make desc t.typ
+  | t -> t
 
 let rec transform_main_expr f term =
   let sub ((id, body) as binding) =
@@ -172,7 +175,9 @@ let rec transform_main_expr f term =
     if args = [] then (id, everywhere_expr f body) else binding
   in
   match term with
-    | {desc = Local(Decl_let bindings, body)} as t -> { t with desc = Local(Decl_let (List.map sub bindings), transform_main_expr f body) }
+  | {desc = Local(Decl_let bindings, body)} as t ->
+      let desc = Local(Decl_let (List.map sub bindings), transform_main_expr f body) in
+      make desc t.typ
     | t -> everywhere_expr f t
 
 (*
@@ -185,7 +190,7 @@ let rec transform_main_expr f term =
 *)
 let randomized_application f t =
   let rec aux f args = function
-    | t when is_base_typ t -> {desc = App (f, args); typ = t; attr=[]}
+    | t when is_base_typ t -> make (App (f, args)) t
     | TFun ({Id.typ = t1}, t2) ->
         let r =
 	  match t1 with
@@ -220,16 +225,16 @@ let rec lambda_lift t =
   match t with
     | {desc = Local(Decl_let bindings, rest)} ->
       let next_bindings = BRA_util.concat_map lift_binding bindings in
-      {t with desc = Local(Decl_let next_bindings, lambda_lift rest)}
+      make (Local(Decl_let next_bindings, lambda_lift rest)) t.typ
     | _ -> t
 
 (* regularization of program form *)
 let regularization e =
   match find_main_function e with
     | Some ({Id.name = "main"} as f) ->
-      let main_expr = randomized_application {desc = Var f; typ = Id.typ f; attr=[]} (Id.typ f) in
+      let main_expr = randomized_application (Term.var f) (Id.typ f) in
       let rec aux = function
-	| {desc = Local(Decl_let bindings, rest)} as t -> {t with desc = Local(Decl_let bindings, aux rest)}
+	| {desc = Local(Decl_let bindings, rest)} as t -> make (Local(Decl_let bindings, aux rest)) t.typ
 	| {desc = Const Unit} -> main_expr
 	| {desc = End_of_definitions} -> main_expr
 	| _ -> assert false
@@ -238,7 +243,7 @@ let regularization e =
     | _ -> e
 
 let extract_id = function
-  | {desc = (Var v)} -> v
+  | {desc = (Var (LId v))} -> v
   | _ -> assert false
 
 let implement_recieving ({program; verified} as holed) =
@@ -255,7 +260,7 @@ let implement_transform_initial_application ({program = program; state = state} 
   let sub = function
     | {desc = App ({desc=Event("fail", _)}, _)}
     | {desc = App ({desc=Const(Rand(TBase TInt,_))}, _)} as t -> t
-    | {desc = App (func, args)} as t -> {t with desc = App (func, concat_map (fun arg -> state.BRA_types.initial_state@[arg]) args)}
+    | {desc = App (func, args)} as t -> make (App (func, concat_map (fun arg -> state.BRA_types.initial_state@[arg]) args)) t.typ
     | t -> t
   in
   { holed with program = transform_main_expr sub program }
@@ -265,7 +270,7 @@ let implement_propagation ({program; verified} as holed) =
   let sub = function
     | {desc = App ({desc=Event("fail", _)}, _)}
     | {desc = App ({desc=Const(Rand(TBase TInt,_))}, _)} as t -> t
-    | {desc = App (func, args)} as t -> {t with desc = App (func, concat_map (fun arg -> propagated@[arg]) args)}
+    | {desc = App (func, args)} as t -> make (App (func, concat_map (fun arg -> propagated@[arg]) args)) t.typ
     | t -> t
   in
   { holed with program = transform_function_definitions (fun (id, body) -> let args,body = decomp_funs body in (id, make_funs args (if !Flag.Termination.split_callsite && id = verified.id then body else everywhere_expr sub body))) program }
@@ -277,19 +282,15 @@ let transform_program_by_call holed =
 
 (* restore type *)
 let restore_type state = function
-  | {desc = Var v; typ = t} as e ->
+  | {desc = Var (LId v); typ = t} as e ->
     let rec restore_type' acc i = function
       | TFun ({Id.typ = t1}, t2) as t ->
 	let fresh_id = Id.new_var ~name:("d_"^v.Id.name^(string_of_int i)) t1 in
-	{ desc = Fun (fresh_id
-			,(restore_type'
-			    { desc = App (acc, (state.initial_state@[make_var fresh_id]))
-			    ; typ = t
-                            ; attr = []}
-			    (i+1)
-			    t2))
-	; typ = t
-        ; attr = []}
+	make (Fun (fresh_id,
+		   (restore_type'
+		      (make (App (acc, (state.initial_state@[make_var fresh_id]))) t)
+		      (i+1)
+		      t2))) t
       | _ -> acc
     in restore_type' e 0 t
   | _ -> raise (Invalid_argument "restore_type")
@@ -374,7 +375,7 @@ let to_holed_programs (target_program : term) =
 	  let app_assert =
 	    Term.(
               seq (if_ prev_set_flag (assert_ hole_term) unit)
-	      {desc = App (var id', vars args'); typ = Id.typ id'; attr=[]})
+	      (make (App (var id', vars args')) (Id.typ id')))
 	  in
 	  (no_checking_function := Some ({id = id'; args = args} : function_info);
 	   [(id, make_funs args' app_assert); (id', make_funs args body_update)])
@@ -382,12 +383,13 @@ let to_holed_programs (target_program : term) =
 	  [(id, make_funs args body')]
     in
 
-    { typed with desc = match typed.desc with
+    let desc = match typed.desc with
       | Local(Decl_let bindings, body) ->
 	let bindings' = BRA_util.concat_map sub bindings in
 	Local(Decl_let bindings', body)
       | t -> t
-    }
+    in
+    make desc typed.typ
   in
   let hole_inserted_programs =
     List.map (fun f ->
@@ -408,11 +410,11 @@ let callsite_split ({program = t; verified = {id = f}; verified_no_checking_ver 
   let replace_index = ref (-1) in
   let is_update = ref true in
   let aux_subst_each = function
-    | {desc = Var v} as e when Id.(v = f) ->
+    | {desc = Var (LId v)} when Id.(v = f) ->
       let v' = if !counter = !replace_index then (is_update := true; f) else f_no in
       begin
 	counter := !counter + 1;
-	{e with desc = Var v'}
+	make_var v'
       end
     | t -> t
   in
@@ -467,17 +469,17 @@ let construct_LLRF {variables = variables_; prev_variables = prev_variables_; co
 
 let rec separate_to_CNF = function
   | {desc = BinOp (Or, {desc = BinOp (And, t1, t2)}, t3)} as t ->
-    separate_to_CNF {t with desc = BinOp (Or, t1, t3)}
-    @ separate_to_CNF {t with desc = BinOp (Or, t2, t3)}
+    separate_to_CNF (make (BinOp (Or, t1, t3)) t.typ)
+    @ separate_to_CNF (make (BinOp (Or, t2, t3)) t.typ)
   | {desc = BinOp (Or, t1, {desc = BinOp (And, t2, t3)})} as t ->
-    separate_to_CNF {t with desc = BinOp (Or, t1, t2)}
-    @ separate_to_CNF {t with desc = BinOp (Or, t1, t3)}
+    separate_to_CNF (make (BinOp (Or, t1, t2)) t.typ)
+    @ separate_to_CNF (make (BinOp (Or, t1, t3)) t.typ)
   | {desc = BinOp (And, t1, t2)} -> [t1; t2]
   | t -> [t]
 
 (* plug holed program with predicate *)
 let pluging (holed_program : holed_program) (predicate : term) =
   let hole2pred = function
-    | {desc = Var {Id.name = "__HOLE__"}} -> predicate
+    | {desc = Var (LId {name = "__HOLE__"})} -> predicate
     | t -> t
   in everywhere_expr hole2pred holed_program.program

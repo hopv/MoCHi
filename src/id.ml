@@ -2,7 +2,7 @@ open Util
 
 type 'a t =
   {id : int;
-   name : string;
+   name : string; (* name must be normalized by [normalize_name] *)
    typ : 'a;
    attr : attr list}
 
@@ -11,7 +11,6 @@ and attr =
   | Coefficient
   | Predicate
   | Primitive
-  | Loc of (Location.t [@printer (fun _ _ -> ())])
   [@@deriving show]
 
 let init_counter = 0
@@ -25,10 +24,26 @@ let save_counter () = tmp_counter := !counter
 let reset_counter () = set_counter !tmp_counter
 let clear_counter () = set_counter init_counter
 
-let make id name attr typ = {id; name; attr; typ}
-let new_var ?(name="x") ?(attr=[]) typ = make (new_int()) name attr typ
-let new_coeff ?(name="c") ?(attr=[]) typ = make (new_int()) name (Coefficient::attr) typ
-let new_predicate ?(name="p") ?(attr=[]) typ = make (new_int()) name (Predicate::attr) typ
+let normalize_name s =
+  if s.[0] = '(' then
+    s
+  else
+    let first = s.[0] in
+    let last = String.last s in
+    if List.mem '*' [first; last] then
+      "( " ^ s ^ " )"
+    else if Char.is_symbol last then
+      "(" ^ s ^ ")"
+    else
+      s
+
+let make ?(id=0) ?(attr=[]) name typ =
+  assert (name <> "");
+  let name = normalize_name name in
+  {id; name; attr; typ}
+let new_var ?(name="x") ?(attr=[]) typ = make ~id:(new_int()) name ~attr typ
+let new_coeff ?(name="c") ?(attr=[]) typ = make ~id:(new_int()) name ~attr:(Coefficient::attr) typ
+let new_predicate ?(name="p") ?(attr=[]) typ = make ~id:(new_int()) name ~attr:(Predicate::attr) typ
 let new_var_id x = {x with id=new_int()}
 
 let id x = x.id
@@ -40,8 +55,6 @@ let is_external x = List.mem External x.attr
 let is_coefficient x = List.mem Coefficient x.attr
 let is_predicate x = List.mem Predicate x.attr
 let is_primitive x = List.mem Primitive x.attr
-
-let get_loc x = List.find_map_opt (function Loc loc -> Some loc | _ -> None) x.attr
 
 let to_string ?(plain=true) x =
   let s =
@@ -58,12 +71,11 @@ let to_string ?(plain=true) x =
     let s = if is_predicate x then "|" ^ s ^ "|" else s in
     s
 
-let from_string name typ =
+let of_string name typ =
   let name = if name = "" then "x" else name in
   let attr = [] in
   let name,attr = if name.[0] = '#' then String.lchop name, Coefficient::attr else name, attr in
-  let name,attr = if name.[0] = '$' then String.lchop name, External::attr else name, attr in
-  let name,attr = if name.[0] = '$' && String.length name >= 3 && String.right name 1 = "$" then String.chop name, Predicate::attr else name, attr in
+  let name,attr = if name.[0] = '$' && String.length name >= 3 && String.last name = '$' then String.chop name, Predicate::attr else name, attr in
   try
     let s1,s2 = String.rsplit name ~by:"_" in
     {id=int_of_string s2; name=s1; typ=typ; attr}
@@ -72,6 +84,7 @@ let from_string name typ =
 let compare x y = Compare.on (Pair.make id name) x y
 let eq x y = compare x y = 0
 let same = eq
+let equal = eq
 let eq_ty ?(eq=(=)) x y = same x y && eq (typ x) (typ y)
 
 let set_id x id = {x with id}
@@ -80,14 +93,11 @@ let set_typ x typ = {x with typ}
 
 let add_name_before str x = set_name x (str ^ name x)
 let add_name_after str x = set_name x (name x ^ str)
+let add_name_prefix = add_name_before
+let add_name_postfix = add_name_after
+let add_name_suffix = add_name_after
 
-let add_attr attr x = {x with attr=attr::x.attr}
-
-let mem x xs = List.mem ~eq x xs
-let assoc x xs = List.assoc ~eq x xs
-let mem_assoc x xs = List.mem_assoc ~eq x xs
-let assoc_opt x xs = List.assoc_opt ~eq x xs
-let assoc_default x y map = List.assoc_default ~eq x y map
+let add_attr attr x = {x with attr = List.cons_unique attr x.attr}
 
 let map_id f x = {x with id = f x.id}
 let map_name f x = {x with name = f x.name}
@@ -142,7 +152,17 @@ let rec decomp_prefixes_string s =
   with Not_found -> [], s
 let decomp_prefixes dummy_ty x =
   let prefixes,name = decomp_prefixes_string (name x) in
-  List.map (fun name -> make 0 name [] dummy_ty) prefixes, set_name x name
+  List.map (make -$- dummy_ty) prefixes, set_name x name
+
+module List =
+  List.Make(
+      struct
+        type nonrec 'a t = 'a t
+        let eq = eq
+      end)
+
+
+(*** DO NOT ADD FUNCTIONS BELOW THIS LINE ***)
 
 let (=) = same
 let (<>) x y = not (same x y)

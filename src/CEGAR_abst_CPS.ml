@@ -33,6 +33,7 @@ let rec decomp_typ_var typ xs =
       let typ',env' = decomp_typ_var typ2 xs' in
       typ', (x,typ1)::env'
 
+(* Assuming eta-long normal forms *)
 let rec decomp_typ_term ts typ =
   match ts,typ with
   | [], _ when is_typ_result typ -> []
@@ -205,7 +206,10 @@ let rec eta_expand_term env t typ =
             let ts'' = aux ts' typ2 in
             eta_expand_term env t typ1 :: ts''
         | t::_, _ ->
-            Format.eprintf "ERROR: %a, %a@." CEGAR_print.term t1 CEGAR_print.term t;
+            Format.eprintf "@.";
+            Format.eprintf "ERROR: %a@." CEGAR_print.term t1;
+            Format.eprintf "       %a@." CEGAR_print.term t;
+            Format.eprintf "       %a@." CEGAR_print.typ typ;
             assert false
       in
       let t' = make_app t1 (aux ts @@ get_typ env t1) in

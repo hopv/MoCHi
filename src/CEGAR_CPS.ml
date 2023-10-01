@@ -163,7 +163,7 @@ let extract_tuple_def env {fn=f; args=xs; cond=t1; body=t2} =
 
 let extract_tuple {env;defs;main;info} =
   let defs = List.map (extract_tuple_def env) defs in
-  let () = if false then Format.printf "EXTRACTED:\n%a@." CEGAR_print.prog {env=[];defs;main;info} in
+  let () = if false then Format.fprintf !Flag.Print.target "EXTRACTED:\n%a@." CEGAR_print.prog {env=[];defs;main;info} in
   Typing.infer {env=[];defs;main;info}
 
 
@@ -189,8 +189,8 @@ let trans {env;defs;main;info} lift_opt =
   let defs = List.map reduce_def defs in
   let defs = and_def::or_def::not_def::defs in
   let prog = {env; defs; main; info} in
-  let () = if false then Format.printf "BEFORE LIFT:\n%a@." CEGAR_print.prog prog in
+  let () = if false then Format.fprintf !Flag.Print.target "BEFORE LIFT:\n%a@." CEGAR_print.prog prog in
   let _ = Typing.infer prog in
   let prog = if lift_opt then CEGAR_lift.lift prog else CEGAR_lift.lift2 prog in
-  let () = if false then Format.printf "LIFTED:\n%a@." CEGAR_print.prog prog in
+  let () = if false then Format.fprintf !Flag.Print.target "LIFTED:\n%a@." CEGAR_print.prog prog in
   extract_tuple prog

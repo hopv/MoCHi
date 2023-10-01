@@ -10,7 +10,7 @@ val refine :
   ((Fpat.Idnt.t * Fpat.Pred.t list) list) list ->
   CEGAR_syntax.prog ->
   (CEGAR_syntax.var * CEGAR_syntax.typ) list * CEGAR_syntax.prog
-(** [refine prefix traces t] で，反例のリスト [traces] を用いて [t] の述語発見を行う．
+(** [refine prefix traces t] finds predicates for [t] by using a list of counterexamples [traces].
 *)
 
 val refine_with_ext :
@@ -29,7 +29,7 @@ val add_renv : (int * (CEGAR_syntax.t -> CEGAR_syntax.t list)) list -> CEGAR_syn
 
 (*
 val remove_preds : Syntax.typed_term -> Syntax.typed_term
-(** [remove_preds t] で， [t] 中の述語を削除する *)
+(** [remove_preds t] removes all the predicates in [t] *)
 *)
 
 exception PostCondition of (Fpat.Idnt.t * Fpat.Type.t) list * Fpat.Formula.t * Fpat.Formula.t

@@ -58,4 +58,4 @@ val trans_ce :
 
 val simplify_if : prog -> prog
 val add_fail_to_end : prog -> prog
-val add_env : Syntax.env -> prog -> prog
+val add_env : (Syntax.id * Syntax.typ) list -> prog -> prog

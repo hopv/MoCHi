@@ -1,7 +1,8 @@
+open Util
+open Type
+open Type_util
 open Syntax
 open Term_util
-open Type
-open Util
 
 module Tree = Rose_tree
 module RT = Ref_type
@@ -69,7 +70,6 @@ let correct_arg_refer rtyp =
   correct_arg_refer (RT.to_simple rtyp) rtyp
 
 let rec uncurry_typ rtyp typ =
-  let r =
   match rtyp,typ with
   | RT.Inter(styp, rtyps), _ ->
       let rtyps' = List.map (uncurry_typ -$- typ) rtyps in
@@ -102,11 +102,8 @@ let rec uncurry_typ rtyp typ =
       let rtyp = RT.Fun(y, rtyp1', rtyp2') in
       List.fold_right (Fun.uncurry RT._ExtArg) exts rtyp
   | _ -> rtyp
-  in
-  Debug.printf "rtyp:%a@.typ:%a@.r:%a@.@." RT.print rtyp Print.typ typ RT.print r;r
 
 and uncurry_typ_arg rtyps typ =
-  let r =
   match rtyps, elim_tattr typ with
   | _, TTuple xs ->
       let aux (rtyps,xrtyps) {Id.typ} =
@@ -124,9 +121,6 @@ and uncurry_typ_arg rtyps typ =
       RT.Tuple xrtyps
   | [rtyp], _ -> uncurry_typ rtyp typ
   | _ -> assert false
-  in
-  Debug.printf "rtyps:%a@.typ:%a@.r:%a@.@." Print.(list RT.print) rtyps Print.typ typ RT.print r;
-  r
 
 let uncurry_rtyp t get_rtyp f =
   let rtyp =
@@ -142,7 +136,7 @@ let uncurry_rtyp t get_rtyp f =
     |@> Debug.printf "rty4: %a@.@." RT.print
   in
   if !!Flag.Debug.print_ref_typ then
-    Format.printf "Curry ref_typ: %a: @[%a@]@]@." Id.print f RT.print rtyp;
+    Format.fprintf !Flag.Print.target "Curry ref_typ: %a: @[%a@]@]@." Id.print f RT.print rtyp;
   rtyp
 
 let rec remove_pair_typ ty =
@@ -156,7 +150,7 @@ let rec remove_pair_typ ty =
       leaf @@ List.fold_right _TFun xs' ty'
   | TTuple xs ->
       node @@ List.map (remove_pair_typ -| Id.typ) xs
-  | TData s -> leaf (TData s)
+  | TConstr(_,[]) -> leaf ty
   | TAttr(_, TTuple[x; {Id.typ}]) when get_tapred ty <> None ->
       let y,ps = Option.get @@ get_tapred ty in
       begin
@@ -179,7 +173,7 @@ let rec remove_pair_typ ty =
       let typ' =
         match remove_pair_typ (Id.typ x) with
         | Tree.Node(Some typ, []) -> typ
-        | Tree.Node _ -> fatal "Not implemented CPS.remove_pair_typ(TPred)"
+        | Tree.Node _ -> failwith "Not implemented CPS.remove_pair_typ(TPred)"
       in
       leaf (add_tapred x ps' typ')
   | TAttr(attr, typ) ->
@@ -188,7 +182,7 @@ let rec remove_pair_typ ty =
       |> root
       |> _TAttr attr
       |> leaf
-  | TApp("set", [ty]) ->
+  | TConstr(c, [ty]) when c = C.set ->
       ty
       |> remove_pair_typ
       |> root
@@ -217,7 +211,7 @@ and remove_pair_aux ?typ t =
   | Const _
   | Event _ -> leaf t
   | Bottom -> map (Fun.const make_bottom) typs
-  | Var x -> map (Fun.const make_var) (remove_pair_var x)
+  | Var (LId x) -> map (Fun.const make_var) (remove_pair_var x)
   | Fun(x, t) ->
       let xs = flatten @@ remove_pair_var x in
       let t' = remove_pair t in
@@ -245,7 +239,7 @@ and remove_pair_aux ?typ t =
   | BinOp(op, t1, t2) ->
       begin
         match op, elim_tattr t1.typ with
-        | (Eq | Lt | Gt | Leq | Geq), (TBase _ | TData _) -> ()
+        | (Eq | Lt | Gt | Leq | Geq), (TBase _ | TConstr(_,[])) -> ()
         | (Eq | Lt | Gt | Leq | Geq), _ ->
             Format.eprintf "%a@." Print.typ t1.typ;
             Format.eprintf "%a@." Print.typ t2.typ;
@@ -268,7 +262,7 @@ and remove_pair_aux ?typ t =
   | Match _ -> assert false
   | TryWith _ -> assert false
   | Tuple ts -> node @@ List.map remove_pair_aux ts
-  | Proj(_, {desc=Var x}) when x = abst_var -> leaf (make_var x) (* for predicates *)
+  | Proj(_, {desc=Var (LId x)}) when x = abst_var -> leaf (make_var x) (* for predicates *)
   | Proj(i,t) ->
       let Tree.Node(_, ts) = remove_pair_aux t in
       List.nth ts i
@@ -288,7 +282,9 @@ and remove_pair_aux ?typ t =
       Format.eprintf "%a@." Print.term t;
       assert false
 
-and remove_pair t = {(root (remove_pair_aux t)) with attr=t.attr}
+and remove_pair t =
+  let t' = root (remove_pair_aux t) in
+  add_attrs t.attr t'
 let remove_pair t =
   let xs = get_vars t in
   let collided =
@@ -306,11 +302,11 @@ let remove_pair t =
     |> List.map fst
   in
   t
-  |*@> Format.printf "INPUT: @[%a@." Print.term
-  |> Trans.alpha_rename_if (Id.mem -$- collided)
-  |*@> Format.printf "OUTPUT: @[%a@." Print.term
+  |*@> Format.fprintf !Flag.Print.target "INPUT: @[%a@." Print.term
+  |> Trans.alpha_rename_if (Id.List.mem -$- collided)
+  |*@> Format.fprintf !Flag.Print.target "OUTPUT: @[%a@." Print.term
   |> remove_pair
-
+  |> set_afv
 
 let rec remove_pair_arg x ty =
   let xtys,map = remove_pair_ref_typ ty in
@@ -360,16 +356,16 @@ let remove_pair_ref_typ (x,t) =
         snd @@ List.fold_right aux' results (0,[])
   in
   t
-  |*@> Format.printf "INPUT: %a, @[%a@." Id.print x Ref_type.print
+  |*@> Format.fprintf !Flag.Print.target "INPUT: %a, @[%a@." Id.print x Ref_type.print
   |> remove_pair_ref_typ
   |> fst
   |> List.map (Pair.map_snd @@ Ref_type.map_pred Trans.eta_tuple)
-  |*@> Format.printf "TRANS: @[%a@." Print.(list (option id * Ref_type.print))
+  |*@> Format.fprintf !Flag.Print.target "TRANS: @[%a@." Print.(list (option id * Ref_type.print))
   |> aux
 
 
 let remove_pair ?(check=true) ({Problem.term=t; spec; attr} as problem) =
-  assert (check => List.mem Problem.ACPS attr);
+  assert (check => List.mem Problem.CPS attr);
   let pr s = Debug.printf "##[remove_pair] %s: %a@." s Print.term in
   let t' =
     t
@@ -395,7 +391,7 @@ let remove_pair ?(check=true) ({Problem.term=t; spec; attr} as problem) =
   in
   {problem with Problem.term=t'; spec}, uncurry_rtyp t
 
-let remove_pair_direct t =
+let remove_pair_term t =
   t
   |> Problem.safety
   |> remove_pair ~check:false

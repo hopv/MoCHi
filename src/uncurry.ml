@@ -1,7 +1,8 @@
-open Syntax
-open Term_util
-open Type
-open Util
+open! Util
+open! Syntax
+open! Term_util
+open! Type
+open! Type_util
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
 
@@ -29,14 +30,7 @@ let rec from_type typ =
   | Type.TBase _ -> TBase
   | Type.TFun(x,typ') -> TFun(from_type @@ Id.typ x, 0, from_type typ')
   | Type.TTuple typs -> TTuple (List.map (from_type -| Id.typ) typs)
-  | Type.TApp _
-  | Type.TData _
-  | Type.TVar _
-  | Type.TAttr _
-  | Type.TFuns _
-  | Type.TVariant _
-  | Type.TRecord _
-  | Type.TModule _ -> unsupported "Uncurry.from_type"
+  | _ -> unsupported "Uncurry.from_type (%a)" Print.typ typ
 
 let rec decomp_tfun sol = function
   | TVar {contents = Some typ} -> decomp_tfun sol typ
@@ -51,16 +45,16 @@ let rec decomp_tfun sol = function
 
 let add_env env idx = Hashtbl.add env idx @@ TVar (ref None)
 let add_env_term env id = add_env env @@ ITerm id
-let add_env_var env x = if false then Format.printf "ADD: %a@." Id.print x; add_env env @@ IVar (Id.to_string x)
+let add_env_var env x = if false then Format.fprintf !Flag.Print.target "ADD: %a@." Id.print x; add_env env @@ IVar (Id.to_string x)
 
-let init = make_trans2 ()
+let init = Tr2.make ()
 let init_term (counter,env) t =
-  let t' = init.tr2_term_rec (counter,env) t in
+  let t' = init.term_rec (counter,env) t in
   let id = gen counter in
   add_env_term env id;
   add_attr (AId id) t'
-let () = init.tr2_term <- init_term
-let init = init.tr2_term
+let () = init.term <- init_term
+let init = init.term
 
 
 let get_id ({attr} as t) =
@@ -95,10 +89,11 @@ let rec infer (env,counter) t =
   | Event _
   | Const _
   | Bottom -> unify (get_typ env t) @@ from_type t.typ
-  | Var x when Id.is_coefficient x -> unify (get_typ env t) TBase
-  | Var x ->
-      if false then Format.printf "x: %a@." Print.id x;
+  | Var (LId x) when Id.is_coefficient x -> unify (get_typ env t) TBase
+  | Var (LId x) ->
+      if false then Format.fprintf !Flag.Print.target "x: %a@." Print.id x;
       unify (get_typ env t) @@ get_typ_var env x
+  | Var _ -> assert false
   | App(t1, ts) ->
       assert (ts <> []);
       let constr = List.flatten_map (infer (env,counter)) (t1::ts) in
@@ -109,7 +104,7 @@ let rec infer (env,counter) t =
         TFun(get_typ env t, id', typ)
       in
       let typ = List.fold_right aux ts @@ get_typ env t in
-      if false then if !id <> None then Format.printf "LET: %d@." @@ Option.get !id;
+      if false then if !id <> None then Format.fprintf !Flag.Print.target "LET: %d@." @@ Option.get !id;
       (0, Option.get !id) :: unify (get_typ env t1) typ @ constr
   | Local(Decl_let bindings, t2) ->
       let aux (f,t1) =
@@ -122,8 +117,8 @@ let rec infer (env,counter) t =
           TFun(get_typ_var env x, id', typ)
         in
         let typ = List.fold_right aux xs @@ get_typ env t1 in
-        if false then Format.printf "id[%a]: %a@." Id.print f (Option.print Format.pp_print_int) !id;
-        if false then if !id <> None then Format.printf "LET: %d@." @@ Option.get !id;
+        if false then Format.fprintf !Flag.Print.target "id[%a]: %a@." Id.print f (Option.print Format.pp_print_int) !id;
+        if false then if !id <> None then Format.fprintf !Flag.Print.target "LET: %d@." @@ Option.get !id;
         let constr1 = (if xs <> [] then [0, Option.get !id] else []) @ unify (get_typ_var env f) typ in
         let constr2 = infer (env,counter) t1 in
         constr1 @ constr2
@@ -146,9 +141,9 @@ let rec infer (env,counter) t =
 
 
 let rec solve sets constr =
-  if false then if constr <> [] then Format.printf "%a@." print_constr @@ List.hd constr;
-  if false then Format.printf "rest: %d@." @@ List.length constr;
-  if false then Format.printf "sets: %a@.@." (List.print @@ List.print Format.pp_print_int) @@ List.map IntSet.elements sets;
+  if false then if constr <> [] then Format.fprintf !Flag.Print.target "%a@." print_constr @@ List.hd constr;
+  if false then Format.fprintf !Flag.Print.target "rest: %d@." @@ List.length constr;
+  if false then Format.fprintf !Flag.Print.target "sets: %a@.@." (List.print @@ List.print Format.pp_print_int) @@ List.map IntSet.elements sets;
   match constr with
   | [] ->
       let set = List.find (IntSet.mem 0) sets in
@@ -159,20 +154,20 @@ let rec solve sets constr =
       solve sets' constr'
 let solve constr = solve [IntSet.singleton 0] constr
 
-let uncurry = make_trans2 ()
+let uncurry = Tr2.make ()
 let uncurry_term (env,sol) t =
   match t.desc with
-  | Var x ->
+  | Var (LId x) ->
       let rec aux typ1 typ2 =
-        let typs,typ1' = decomp_tfun sol typ1 in
-        let xs,typ2' = Type.decomp_tfun typ2 in
-        if typs = []
-        then typ2
-        else
-          let xs1,xs2 = List.split_nth (List.length typs) xs in
-          TFun(new_var_of_term @@ make_tuple @@ List.map make_var xs1, aux typ1' @@ List.fold_right _TFun xs2 typ2')
+        match decomp_tfun sol typ1 with
+        | [], _ -> typ2
+        | typs,typ1' ->
+            let xs,typ2' = Type_util.decomp_tfun typ2 in
+            let xs1,xs2 = List.split_nth (List.length typs) xs in
+            Type.TFun(new_var_of_term @@ make_tuple @@ List.map make_var xs1, aux typ1' @@ List.fold_right _TFun xs2 typ2')
       in
-      make_var @@ Id.set_typ x @@ aux (get_typ_var env x) @@ Id.typ x
+      make_var @@ Id.map_typ (aux (get_typ_var env x)) x
+  | Var _ -> assert false
   | App(t1, ts) ->
       let rec aux ts typ =
         if ts = []
@@ -183,18 +178,18 @@ let uncurry_term (env,sol) t =
           let ts1,ts2 = List.split_nth (List.length typs) ts in
           make_tuple ts1 :: aux ts2 typ'
       in
-      let t1' = uncurry.tr2_term (env,sol) t1 in
-      let ts' = List.map (uncurry.tr2_term (env,sol)) ts in
+      let t1' = uncurry.term (env,sol) t1 in
+      let ts' = List.map (uncurry.term (env,sol)) ts in
       make_app t1' @@ aux ts' @@ get_typ env t1
   | Local(Decl_let bindings, t2) ->
       let aux (f,t1) =
         let xs,t1 = decomp_funs t1 in
         let rec aux xs typ =
           let typs,typ' = decomp_tfun sol typ in
-          if false then Format.printf "f: %a@." Id.print f;
-          if false then Format.printf "typ: %a@." print typ;
-          if false then Format.printf "|typs|: %d@." @@ List.length typs;
-          if false then Format.printf "|xs|: %d@." @@ List.length xs;
+          if false then Format.fprintf !Flag.Print.target "f: %a@." Id.print f;
+          if false then Format.fprintf !Flag.Print.target "typ: %a@." print typ;
+          if false then Format.fprintf !Flag.Print.target "|typs|: %d@." @@ List.length typs;
+          if false then Format.fprintf !Flag.Print.target "|xs|: %d@." @@ List.length xs;
           if xs = []
           then []
           else
@@ -209,16 +204,16 @@ let uncurry_term (env,sol) t =
           | [z] -> make_fun y @@ subst_var z y t1
           | _ -> make_fun y @@ subst_map (List.mapi (fun i z -> z, make_proj i @@ make_var y) ys) t1
         in
-        let t1' = uncurry.tr2_term (env,sol) t1 in
+        let t1' = uncurry.term (env,sol) t1 in
         let t = List.fold_right aux' xss t1' in
         Id.set_typ f t.typ, t
       in
       let bindings' = List.map aux bindings in
-      make_let bindings' @@ uncurry.tr2_term (env,sol) t2
-  | _ -> uncurry.tr2_term_rec (env,sol) t
+      make_let bindings' @@ uncurry.term (env,sol) t2
+  | _ -> uncurry.term_rec (env,sol) t
 
-let () = uncurry.tr2_term <- uncurry_term
-let uncurry = uncurry.tr2_term
+let () = uncurry.term <- uncurry_term
+let uncurry = uncurry.term
 
 
 let uncurry t =
@@ -226,17 +221,17 @@ let uncurry t =
   let env = Hashtbl.create 0 in
   let t' = init (counter,env) t in
   let constr = infer (env,counter) t' in
-  if false then Format.printf "constr: %a@." (List.print print_constr) constr;
+  if false then Format.fprintf !Flag.Print.target "constr: %a@." (List.print print_constr) constr;
   let sol = solve constr in
   t'
   |> uncurry (env,sol)
   |> Trans.remove_id
 
-let to_tfuns = make_trans2 ()
+let to_tfuns = Tr2.make ()
 
 let to_funs_var env sol x =
   let rec decomp typ n =
-    if false then Format.printf "decomp: %a, %d@." Print.typ typ n;
+    if false then Format.fprintf !Flag.Print.target "decomp: %a, %d@." Print.typ typ n;
     if n = 0
     then [], typ
     else
@@ -247,8 +242,8 @@ let to_funs_var env sol x =
       | _ -> assert false
   in
   let rec aux typ1 typ2 =
-    if false then Format.printf "typ1: %a@." print typ1;
-    if false then Format.printf "typ2: %a@.@." Print.typ typ2;
+    if false then Format.fprintf !Flag.Print.target "typ1: %a@." print typ1;
+    if false then Format.fprintf !Flag.Print.target "typ2: %a@.@." Print.typ typ2;
     let typs,typ1' = decomp_tfun sol typ1 in
     if typs = []
     then typ2
@@ -265,20 +260,20 @@ let to_tfuns_desc (env,sol) desc =
   | Local(Decl_let bindings, t) ->
       let aux (f,t) (bindings',t') =
         let xs,t = decomp_funs t in
-        if false then Format.printf "f: %a@." Id.print f;
+        if false then Format.fprintf !Flag.Print.target "f: %a@." Id.print f;
         let f' = to_funs_var env sol f in
-        if false then Format.printf "f': %a@." Print.id_typ f';
+        if false then Format.fprintf !Flag.Print.target "f': %a@." Print.id_typ f';
         let xs' = List.map (to_funs_var env sol) xs in
         let sbst = List.fold_right2 subst_var (f::xs) (f'::xs') in
-        (f', make_funs xs' @@ sbst @@ to_tfuns.tr2_term (env,sol) t)::bindings', sbst t'
+        (f', make_funs xs' @@ sbst @@ to_tfuns.term (env,sol) t)::bindings', sbst t'
       in
-      let bindings',t' = List.fold_right aux bindings @@ ([], to_tfuns.tr2_term (env,sol) t) in
+      let bindings',t' = List.fold_right aux bindings @@ ([], to_tfuns.term (env,sol) t) in
       let map = List.map2 (fun (f,_) (f',_) -> f, f') bindings bindings' in
       let bindings'' = List.map (Pair.map_snd @@ List.fold_right (Fun.uncurry subst_var) map) bindings' in
       Local(Decl_let bindings'', t')
-  | _ -> to_tfuns.tr2_desc_rec (env,sol) desc
+  | _ -> to_tfuns.desc_rec (env,sol) desc
 
-let () = to_tfuns.tr2_desc <- to_tfuns_desc
+let () = to_tfuns.desc <- to_tfuns_desc
 
 let to_tfuns t =
   Debug.printf "[UNCURRY] INPUT; %a@." Print.term t;
@@ -289,4 +284,4 @@ let to_tfuns t =
   let constr = infer (env,counter) t' in
   Debug.printf "[UNCURRY] constr: %a@." (List.print print_constr) constr;
   let sol = solve constr in
-  Trans.reconstruct @@ to_tfuns.tr2_term (env,sol) t
+  Trans.reconstruct @@ to_tfuns.term (env,sol) t

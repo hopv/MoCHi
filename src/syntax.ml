@@ -1,12 +1,16 @@
 open Util
 open Type
+open Type_util
 
-type label = Read | Write | Close
-and binop = Eq | Lt | Gt | Leq | Geq | And | Or | Add | Sub | Mult | Div
+type binop = Eq | Lt | Gt | Leq | Geq | And | Or | Add | Sub | Mult | Div
 
 and typ = term Type.t
-and tattr = term Type.attr [@printer Type.print_attr]
+and tattr = term Type.attr [@printer Print_typ.attr]
 and id = typ Id.t
+and lid =
+  | LId of id
+  | LDot of lid * string (* string must be normalized by [Id.normalize_name] *)
+  | LApp of lid * lid
 
 and const = (* only base type constants *)
   | Unit
@@ -22,25 +26,27 @@ and const = (* only base type constants *)
   | CPS_result
   | Rand of typ * bool (** true denotes CPS-term *)
   | Empty
+  | Dummy of typ
 
 and attr =
-  | AAbst_under
-  | ATerminate
-  | ANotFail
-  | ADeterministic
-  | AComment of string
-  | AId of int
-  | ADoNotInline
-  | AEffect of Type.effect list
-  | ALoc of (Location.t [@printer (fun _ _ -> ())])
-  | AMark of bool ref
-  | AInfo of info (** temporal information for transformations *)
+  | AAbst_under (** For disproving termination *)
+  | ATerminate (** Terminating terms *)
+  | ANotFail (** Safe terms *)
+  | ADeterministic (** Deterministic terms *)
+  | AComment of string (** Comments for test/debug *)
+  | AId of int (** Unique id for specific transformations (This must be removed after a transformation) *)
+  | ADoNotInline (** If this attribute is annotated to `Local ...`, the bindings should not be inlined *)
+  | AEffect of Type.effect list (** The result of effect analysis *)
+  | ALoc of (Location.t [@printer Location.print_loc]) (** Original location in the source code *)
+  | AMark of bool ref (** Only for debugging *)
+  | AInfo of info (** Temporal information for some transformations *)
+  | AFV of id list (** Bag of free variables *)
 
 and term = {desc:desc; typ:typ; attr:attr list}
 and desc =
   | End_of_definitions
   | Const of const
-  | Var of id
+  | Var of lid
   | Fun of id * term
   | App of term * term list
   | If of term * term * term
@@ -48,33 +54,50 @@ and desc =
   | BinOp of binop * term * term
   | Not of term
   | Event of string * bool (** true denotes CPS-term *)
-  | Record of (string * term) list
-  | Field of term * string
-  | SetField of term * string * term
+  | Record of (label * term) list
+  | Field of term * label
+  | SetField of term * label * term
   | Nil
   | Cons of term * term
-  | Constr of string * term list
+  | Constr of bool * path * term list (** true denotes polymorphic variant *)
+    (* path (not constr) is need for extensible types *)
   | Match of term * (pattern * term) list (** a term diverges if no patters are matched *)
   | Raise of term
   | TryWith of term * term
   | Tuple of term list
   | Proj of int * term
   | Bottom
-  | Label of info * term (* just for tupling? *)
+  | Label of info * term (* just for tupling? TODO: merge this into aatr *)
   | Ref of term
   | Deref of term
   | SetRef of term * term
   | TNone
   | TSome of term
+  | Lazy of term
   | Module of declaration list
-  | MemSet of term * term (** MemSet(x,X) means x \in X *)
-  | AddSet of term * term (** AddSet(x,X) means {x} \cup X *)
-  | Subset of term * term (** SubSet(X,Y) means X \subset Y *)
+  | Pack of term
+  | Unpack of term
+  | Forall of id * term
+  | Exists of id * term
+  (* TODO: The following should be BinOp? *)
+  | MemSet of term * term (** [MemSet(x,X)] means x \in X *)
+  | AddSet of term * term (** [AddSet(x,X)] means {x} \cup X *)
+  | Subset of term * term (** [Subset(X,Y)] means X \subseteq Y *)
 
 and declaration =
-  | Decl_let of (id * term) list
-  | Decl_type of (string * typ) list
-  | Open of id
+  | Decl_let of (id * term) list   (** [let rec .. and ...] *)
+  | Decl_type of type_decls        (** [type t = ... and ...] *)
+  | Type_ext of extension          (** [type t += ...] and [exception A = B] *)
+  | Include of term                (** [include t] *)
+  | Decl_multi of declaration list (** Multiple declarations only for compositional transformation; implicitly removed by _Local *)
+
+and label = Type.label
+
+and extension = term Type.extension
+and type_decls = term Type.declaration
+and type_decl = term Type.decl_item
+
+and params = typ list (* The type must be TVar *)
 
 and info =
   | InfoInt of int
@@ -82,7 +105,6 @@ and info =
   | InfoId of id
   | InfoTerm of term
   | InfoIdTerm of id * term
-
 
 and type_kind =
   | KAbstract
@@ -92,43 +114,295 @@ and type_kind =
 
 and rec_flag = Nonrecursive | Recursive
 
-and pred = desc
-
-and pattern = {pat_desc:pat_desc; pat_typ:typ}
+and pattern = {pat_desc:pat_desc; pat_typ:typ; pat_attr:pat_attr list}
 and pat_desc =
   | PAny
-  | PNondet (* match non-deterministically: can be replaced with PWhen *)
+  | PNondet (** match non-deterministically: can be replaced with PWhen(__, randb) *)
   | PVar of id
   | PAlias of pattern * id
   | PConst of term
-  | PConstr of string * pattern list
+  | PConstr of bool * path * pattern list (** true denotes polymorphic variant *)
+    (* path (not constr) is need for extensible types *)
   | PNil
   | PCons of pattern * pattern
   | PTuple of pattern list
-  | PRecord of (string * pattern) list
+  | PRecord of (label * pattern) list
   | PNone
   | PSome of pattern
   | POr of pattern * pattern
   | PWhen of pattern * term
-  [@@deriving show]
+  | PLazy of pattern
+  | PEval of id * term * pattern
+    (** [match [v/x]t with p -> [v/x]t2 | ...] --> [t2']
+        -------------------------------------------------
+        [match v with PEval(x,t,p) -> t2 | ...] --> [t2'] *)
+and pat_attr =
+  | PAFV of id list
+  | PABV of id list
 
-type env = (id * typ) list
+and env = term Tenv.t
+  [@@deriving show {with_path = false}]
 
+(***** The following should be generated by using ppx FROM HERE *****)
 let typ t = t.typ
 let desc t = t.desc
 let attr t = t.attr
+let pat_typ p = p.pat_typ
 
+let _LId c = LId c
+let _LDot path s = LDot(path, s)
+let _LApp path1 path2 = LApp(path1, path2)
 
-module Id = struct
-  include Id
-  let new_var ?name ?(attr=[]) typ =
-    let name =
-      match name with
-      | None -> Type.var_name_of typ
-      | Some name -> name
-    in
-    make !!new_int name attr typ
+let _End_of_definitions = End_of_definitions
+let _Const c = Const c
+let _Var x = Var x
+let _Fun x t = Fun(x, t)
+let _App t ts = App(t, ts)
+let _If t1 t2 t3 = If(t1, t2, t3)
+let _Local decl t =
+  match decl with
+  | Decl_multi [] -> t.desc
+  | _ -> Local(decl, t)
+let _BinOp op t1 t2 = BinOp(op, t1, t2)
+let _Not t = Not t
+let _Event s b = Event(s, b)
+let _Record fields = Record fields
+let _Field t s = Field(t, s)
+let _SetField t1 s t2 = SetField(t1, s, t2)
+let _Nil = Nil
+let _Cons t1 t2 = Cons(t1, t2)
+let _Constr b s ts = Constr(b, s, ts)
+let _Match t pats = Match(t, pats)
+let _Raise t = Raise t
+let _TryWith t1 t2 = TryWith(t1, t2)
+let _Tuple ts = Tuple ts
+let _Proj i t = Proj(i, t)
+let _Bottom = Bottom
+let _Label info t = Label(info, t)
+let _Ref t = Ref t
+let _Deref t = Deref t
+let _SetRef t1 t2 = SetRef(t1, t2)
+let _TNone = TNone
+let _TSome t = TSome t
+let _Lazy t = Lazy t
+let _Module decls = Module decls
+let _Pack t = Pack t
+let _Unpack t = Unpack t
+let _MemSet t1 t2 = MemSet(t1, t2)
+let _AddSet t1 t2 = AddSet(t1, t2)
+let _Subset t1 t2 = Subset(t1, t2)
+let _Forall x t = Forall(x, t)
+let _Exists x t = Exists(x, t)
+
+let _Decl_let defs = Decl_let defs
+let _Decl_type decls = Decl_type decls
+let _Type_ext ext = Type_ext ext
+let _Include t = Include t
+
+let _PAny = PAny
+let _PNondet = PNondet
+let _PVar x = PVar x
+let _PAlias p x = PAlias(p, x)
+let _PConst t = PConst t
+let _PConstr b s ps = PConstr(b, s, ps)
+let _PNil = PNil
+let _PCons p1 p2 = PCons(p1, p2)
+let _PTuple ps = PTuple ps
+let _PRecord fields = PRecord fields
+let _PNone = PNone
+let _PSome p = PSome p
+let _POr p1 p2 = POr(p1, p2)
+let _PLazy p = PLazy p
+let _PWhen p1 p2 = PWhen(p1, p2)
+let _PEval x t p = PEval(x, t, p)
+let _PAFV xs = PAFV xs
+let _PABV xs = PABV xs
+
+module Val = struct
+  let _LId = function LId x -> Some x | _ -> None
+  let _Const = function {desc=Const c} -> Some c | _ -> None
+  let _Var = function {desc=Var x} -> Some x | _ -> None
+  let _Fun = function {desc=Fun(x, t)} -> Some(x, t) | _ -> None
+  let _App = function {desc=App(t, ts)} -> Some(t, ts) | _ -> None
+  let _If = function {desc=If(t1, t2, t3)} -> Some(t1, t2, t3) | _ -> None
+  let _Local = function {desc=Local(decl, t)} -> Some(decl, t) | _ -> None
+  let _BinOp = function {desc=BinOp(op, t1, t2)} -> Some(op, t1, t2) | _ -> None
+  let _Not = function {desc=Not t} -> Some t | _ -> None
+  let _Event = function {desc=Event(s, b)} -> Some(s, b) | _ -> None
+  let _Record = function {desc=Record fields} -> Some fields | _ -> None
+  let _Field = function {desc=Field(t, s)} -> Some(t, s) | _ -> None
+  let _SetField = function {desc=SetField(t1, s, t2)} -> Some(t1, s, t2) | _ -> None
+  let _Cons = function {desc=Cons(t1, t2)} -> Some(t1, t2) | _ -> None
+  let _Constr = function {desc=Constr(b, s, ts)} -> Some(b, s, ts) | _ -> None
+  let _Match = function {desc=Match(t, pats)} -> Some(t, pats) | _ -> None
+  let _Raise = function {desc=Raise t} -> Some t | _ -> None
+  let _TryWith = function {desc=TryWith(t1, t2)} -> Some(t1, t2) | _ -> None
+  let _Tuple = function {desc=Tuple ts} -> Some ts | _ -> None
+  let _Proj = function {desc=Proj(i, t)} -> Some(i, t) | _ -> None
+  let _Label = function {desc=Label(info, t)} -> Some(info, t) | _ -> None
+  let _Ref = function {desc=Ref t} -> Some t | _ -> None
+  let _Deref = function {desc=Deref t} -> Some t | _ -> None
+  let _SetRef = function {desc=SetRef(t1, t2)} -> Some(t1, t2) | _ -> None
+  let _TSome = function {desc=TSome t} -> Some t | _ -> None
+  let _Lazy = function {desc=Lazy t} -> Some t | _ -> None
+  let _Module = function {desc=Module decls} -> Some decls | _ -> None
+  let _Pack = function {desc=Pack t} -> Some t | _ -> None
+  let _Unpack = function {desc=Unpack t} -> Some t | _ -> None
+  let _MemSet = function {desc=MemSet(t1, t2)} -> Some(t1, t2) | _ -> None
+  let _AddSet = function {desc=AddSet(t1, t2)} -> Some(t1, t2) | _ -> None
+  let _Subset = function {desc=Subset(t1, t2)} -> Some(t1, t2) | _ -> None
+  let _Forall = function {desc=Forall(x, t)} -> Some(x, t) | _ -> None
+  let _Exists = function {desc=Exists(x, t)} -> Some(x, t) | _ -> None
+
+  let _Decl_let = function Decl_let defs -> Some defs | _ -> None
+  let _Decl_type = function Decl_type decls -> Some decls | _ -> None
+  let _Type_ext = function Type_ext ext -> Some ext | _ -> None
+  let _Include = function Include ext -> Some ext | _ -> None
+
+  let _PVar = function {pat_desc=PVar x} -> Some x | _ -> None
+  let _PAlias = function {pat_desc=PAlias(p, x)} -> Some (p, x) | _ -> None
+  let _PConst = function {pat_desc=PConst t} -> Some t | _ -> None
+  let _PConstr = function {pat_desc=PConstr(b, s, ps)} -> Some (b, s, ps) | _ -> None
+  let _PCons = function {pat_desc=PCons(p1, p2)} -> Some (p1, p2) | _ -> None
+  let _PTuple = function {pat_desc=PTuple ps} -> Some ps | _ -> None
+  let _PRecord = function {pat_desc=PRecord fields} -> Some fields | _ -> None
+  let _PSome = function {pat_desc=PSome p} -> Some p | _ -> None
+  let _POr = function {pat_desc=POr(p1, p2)} -> Some (p1, p2) | _ -> None
+  let _PWhen = function {pat_desc=PWhen(p1, p2)} -> Some (p1, p2) | _ -> None
+  let _PEval = function {pat_desc=PEval(x, t, p)} -> Some (x, t, p) | _ -> None
+  let _PAFV = function PAFV xs -> Some xs | _ -> None
+  let _PABV = function PABV xs -> Some xs | _ -> None
 end
+
+module ValE = struct
+  let _LId      = function LId x -> x                                | _ -> [%invalid_arg]
+  let _Const    = function {desc=Const c} -> c                       | _ -> [%invalid_arg]
+  let _Var      = function {desc=Var x} -> x                         | _ -> [%invalid_arg]
+  let _Fun      = function {desc=Fun(x, t)} -> (x, t)                | _ -> [%invalid_arg]
+  let _App      = function {desc=App(t, ts)} -> (t, ts)              | _ -> [%invalid_arg]
+  let _If       = function {desc=If(t1, t2, t3)} -> (t1, t2, t3)     | _ -> [%invalid_arg]
+  let _Local    = function {desc=Local(decl, t)} -> (decl, t)        | _ -> [%invalid_arg]
+  let _BinOp    = function {desc=BinOp(op, t1, t2)} -> (op, t1, t2)  | _ -> [%invalid_arg]
+  let _Not      = function {desc=Not t} -> t                         | _ -> [%invalid_arg]
+  let _Event    = function {desc=Event(s, b)} -> (s, b)              | _ -> [%invalid_arg]
+  let _Record   = function {desc=Record fields} -> fields            | _ -> [%invalid_arg]
+  let _Field    = function {desc=Field(t, s)} -> (t, s)              | _ -> [%invalid_arg]
+  let _SetField = function {desc=SetField(t1, s, t2)} -> (t1, s, t2) | _ -> [%invalid_arg]
+  let _Cons     = function {desc=Cons(t1, t2)} -> (t1, t2)           | _ -> [%invalid_arg]
+  let _Constr   = function {desc=Constr(b, s, ts)} -> (b, s, ts)     | _ -> [%invalid_arg]
+  let _Match    = function {desc=Match(t, pats)} -> (t, pats)        | _ -> [%invalid_arg]
+  let _Raise    = function {desc=Raise t} -> t                       | _ -> [%invalid_arg]
+  let _TryWith  = function {desc=TryWith(t1, t2)} -> (t1, t2)        | _ -> [%invalid_arg]
+  let _Tuple    = function {desc=Tuple ts} -> ts                     | _ -> [%invalid_arg]
+  let _Proj     = function {desc=Proj(i, t)} -> (i, t)               | _ -> [%invalid_arg]
+  let _Label    = function {desc=Label(info, t)} -> (info, t)        | _ -> [%invalid_arg]
+  let _Ref      = function {desc=Ref t} -> t                         | _ -> [%invalid_arg]
+  let _Deref    = function {desc=Deref t} -> t                       | _ -> [%invalid_arg]
+  let _SetRef   = function {desc=SetRef(t1, t2)} -> (t1, t2)         | _ -> [%invalid_arg]
+  let _TSome    = function {desc=TSome t} -> t                       | _ -> [%invalid_arg]
+  let _Lazy     = function {desc=Lazy t} -> t                        | _ -> [%invalid_arg]
+  let _Module   = function {desc=Module decls} -> decls              | _ -> [%invalid_arg]
+  let _Pack     = function {desc=Pack t} -> t                        | _ -> [%invalid_arg]
+  let _Unpack   = function {desc=Unpack t} -> t                      | _ -> [%invalid_arg]
+  let _MemSet   = function {desc=MemSet(t1, t2)} -> (t1, t2)         | _ -> [%invalid_arg]
+  let _AddSet   = function {desc=AddSet(t1, t2)} -> (t1, t2)         | _ -> [%invalid_arg]
+  let _Subset   = function {desc=Subset(t1, t2)} -> (t1, t2)         | _ -> [%invalid_arg]
+  let _Forall   = function {desc=Forall(x, t)} -> (x, t)             | _ -> [%invalid_arg]
+  let _Exists   = function {desc=Exists(x, t)} -> (x, t)             | _ -> [%invalid_arg]
+
+  let _Decl_let  = function Decl_let defs -> defs    | _ -> [%invalid_arg]
+  let _Decl_type = function Decl_type decls -> decls | _ -> [%invalid_arg]
+  let _Type_ext  = function Type_ext ext -> ext      | _ -> [%invalid_arg]
+
+  let _PVar    = function {pat_desc=PVar x} -> x                     | _ -> [%invalid_arg]
+  let _PAlias  = function {pat_desc=PAlias(p, x)} -> (p, x)          | _ -> [%invalid_arg]
+  let _PConst  = function {pat_desc=PConst t} -> t                   | _ -> [%invalid_arg]
+  let _PConstr = function {pat_desc=PConstr(b, s, ps)} -> (b, s, ps) | _ -> [%invalid_arg]
+  let _PCons   = function {pat_desc=PCons(p1, p2)} -> (p1, p2)       | _ -> [%invalid_arg]
+  let _PTuple  = function {pat_desc=PTuple ps} -> ps                 | _ -> [%invalid_arg]
+  let _PRecord = function {pat_desc=PRecord fields} -> fields        | _ -> [%invalid_arg]
+  let _PSome   = function {pat_desc=PSome p} -> p                    | _ -> [%invalid_arg]
+  let _POr     = function {pat_desc=POr(p1, p2)} -> (p1, p2)         | _ -> [%invalid_arg]
+  let _PWhen   = function {pat_desc=PWhen(p1, p2)} -> (p1, p2)       | _ -> [%invalid_arg]
+  let _PEval   = function {pat_desc=PEval(x, t, p)} -> (x, t, p)     | _ -> [%invalid_arg]
+
+  let _PAFV    = function PAFV xs -> xs | _ -> [%invalid_arg]
+  let _PABV    = function PABV xs -> xs | _ -> [%invalid_arg]
+end
+
+module Is = struct
+  let _LId = function LId _ -> true | _ -> false
+
+  let _Const    = function {desc=Const _} -> true    | _ -> false
+  let _Var      = function {desc=Var _} -> true      | _ -> false
+  let _Fun      = function {desc=Fun _} -> true      | _ -> false
+  let _App      = function {desc=App _} -> true      | _ -> false
+  let _If       = function {desc=If _} -> true       | _ -> false
+  let _Local    = function {desc=Local _} -> true    | _ -> false
+  let _BinOp    = function {desc=BinOp _} -> true    | _ -> false
+  let _Not      = function {desc=Not _} -> true      | _ -> false
+  let _Event    = function {desc=Event _} -> true    | _ -> false
+  let _Record   = function {desc=Record _} -> true   | _ -> false
+  let _Field    = function {desc=Field _} -> true    | _ -> false
+  let _SetField = function {desc=SetField _} -> true | _ -> false
+  let _Cons     = function {desc=Cons _} -> true     | _ -> false
+  let _Constr   = function {desc=Constr _} -> true   | _ -> false
+  let _Match    = function {desc=Match _} -> true    | _ -> false
+  let _Raise    = function {desc=Raise _} -> true    | _ -> false
+  let _TryWith  = function {desc=TryWith _} -> true  | _ -> false
+  let _Tuple    = function {desc=Tuple _} -> true    | _ -> false
+  let _Proj     = function {desc=Proj _} -> true     | _ -> false
+  let _Label    = function {desc=Label _} -> true    | _ -> false
+  let _Ref      = function {desc=Ref _} -> true      | _ -> false
+  let _Deref    = function {desc=Deref _} -> true    | _ -> false
+  let _SetRef   = function {desc=SetRef _} -> true   | _ -> false
+  let _TSome    = function {desc=TSome _} -> true    | _ -> false
+  let _Lazy     = function {desc=Lazy _} -> true     | _ -> false
+  let _Module   = function {desc=Module _} -> true   | _ -> false
+  let _Pack     = function {desc=Pack _} -> true     | _ -> false
+  let _Unpack   = function {desc=Unpack _} -> true   | _ -> false
+  let _MemSet   = function {desc=MemSet _} -> true   | _ -> false
+  let _AddSet   = function {desc=AddSet _} -> true   | _ -> false
+  let _Subset   = function {desc=Subset _} -> true   | _ -> false
+  let _Forall   = function {desc=Forall _} -> true   | _ -> false
+  let _Exists   = function {desc=Exists _} -> true   | _ -> false
+
+  let _PVar    = function {pat_desc=PVar _} -> true    | _ -> false
+  let _PAlias  = function {pat_desc=PAlias _} -> true  | _ -> false
+  let _PConst  = function {pat_desc=PConst _} -> true  | _ -> false
+  let _PConstr = function {pat_desc=PConstr _} -> true | _ -> false
+  let _PCons   = function {pat_desc=PCons _} -> true   | _ -> false
+  let _PTuple  = function {pat_desc=PTuple _} -> true  | _ -> false
+  let _PRecord = function {pat_desc=PRecord _} -> true | _ -> false
+  let _PSome   = function {pat_desc=PSome _} -> true   | _ -> false
+  let _POr     = function {pat_desc=POr _} -> true     | _ -> false
+  let _PWhen   = function {pat_desc=PWhen _} -> true   | _ -> false
+  let _PEval   = function {pat_desc=PEval _} -> true   | _ -> false
+
+  let _PAFV    = function PAFV _ -> true | _ -> false
+  let _PABV    = function PABV _ -> true | _ -> false
+end
+(***** TO HERE *****)
+
+let constr_of_id (x:id) : tconstr = Id.set_typ x ()
+let tconstr_of_id (x:id) : tconstr = Id.set_typ x ()
+let rec path_of_lid (lid:lid) : path =
+  match lid with
+  | LId x -> LId (tconstr_of_id x)
+  | LDot(lid',s) -> LDot(path_of_lid lid', s)
+  | LApp(lid1,lid2) -> LApp(path_of_lid lid1, path_of_lid lid2)
+
+let rec lid_of_path ?(env=[]) (path:path) : lid =
+  match path with
+  | LId x -> LId (Id.set_typ x (Id.List.assoc_default Ty.unknown x env))
+  | LDot(path',s) -> LDot(lid_of_path path', s)
+  | LApp(path1,path2) -> LApp(lid_of_path path1, lid_of_path path2)
+
+let rec head_of_lid lid =
+  match lid with
+  | LId id -> id
+  | LDot(p, _) -> head_of_lid p
+  | LApp _ -> invalid_arg "Longid.head"
 
 module ID = struct
   type t = id
@@ -136,1583 +410,1870 @@ module ID = struct
   let print = Id.print
 end
 
-module PredVar = struct
-  let pvar_name = "P"
-  let is_pvar = Id.is_predicate
-  let new_pvar ?(name=pvar_name) tys =
-    let ty = List.fold_right make_tfun tys Ty.bool in
-    Id.new_var ~name ~attr:[Id.Predicate] ty
+module IdSet = Set.Make(ID)
+module IdMap = Map.Make(ID)
+
+let safe_attr = [ANotFail; ATerminate]
+let pure_attr = [ANotFail; ATerminate; ADeterministic]
+let const_attr = AFV [] :: pure_attr
+
+
+module Tr = struct
+  type t =
+    {mutable term:      term -> term;
+     mutable term_rec:  term -> term;
+     mutable desc:      desc -> desc;
+     mutable desc_rec:  desc -> desc;
+     mutable typ:       typ -> typ;
+     mutable typ_rec:   typ -> typ;
+     mutable var:       id -> id;
+     mutable lid:       lid -> lid;
+     mutable pat:       pattern -> pattern;
+     mutable pat_rec:   pattern -> pattern;
+     mutable info:      info -> info;
+     mutable info_rec:  info -> info;
+     mutable decl:      declaration -> declaration;
+     mutable decl_rec:  declaration -> declaration;
+     mutable const:     const -> const;
+     mutable const_rec: const -> const;
+     mutable attr:      attr list -> attr list}
+
+  let gen_typ tr = function
+    | TBase b -> TBase b
+    | TVar(_,{contents=Some typ},_) -> tr.typ typ
+    | TVar(b,x,id) -> TVar(b,x,id)
+    | TFun(x,typ) -> TFun(Id.map_typ tr.typ x, tr.typ typ)
+    | TFuns(xs,typ) -> TFuns(List.map (Id.map_typ tr.typ) xs, tr.typ typ)
+    | TConstr(c, typs) -> TConstr(c, List.map tr.typ typs)
+    | TTuple xs -> TTuple (List.map tr.var xs)
+    | TAttr(attr, typ) ->
+        let tr_attr a =
+          match a with
+          | TAPred(x,ps) -> TAPred(tr.var x, List.map tr.term ps)
+          | TARefPred(x,p) -> TARefPred(tr.var x, tr.term p)
+          | TAPureFun -> TAPureFun
+          | TAEffect e -> TAEffect e
+          | TAPredShare x -> TAPredShare x
+          | TAId(s,n) -> TAId(s,n)
+          | TARaise ty -> TARaise (tr.typ ty)
+        in
+        TAttr(List.map tr_attr attr, tr.typ typ)
+    | TVariant(poly,rows) ->
+        let tr_row {row_constr; row_args; row_ret} =
+          let row_args = List.map tr.typ row_args in
+          let row_ret = Option.map tr.typ row_ret in
+          {row_constr; row_args; row_ret}
+        in
+        TVariant(poly, List.map tr_row rows)
+    | TRecord fields -> TRecord Fmap.(list (snd (snd tr.typ)) fields)
+    | TModSig {sig_types; sig_values; sig_ext} ->
+        let sig_types = Fmap.(list (list (snd (snd tr.typ)))) sig_types in
+        let sig_values = List.map tr.var sig_values in
+        let sig_ext =
+          let tr_row {ext_row_path; ext_row_args; ext_row_ret} =
+            let ext_row_args = List.map tr.typ ext_row_args in
+            let ext_row_ret = Option.map tr.typ ext_row_ret in
+            {ext_row_path; ext_row_args; ext_row_ret}
+          in
+          Fmap.(list (snd (snd tr_row))) sig_ext
+        in
+        TModSig {sig_types; sig_values; sig_ext}
+    | TModLid m -> TModLid m
+    | TPackage ty -> TPackage (tr.typ ty)
+    | TPoly(vars, ty) -> TPoly(vars, tr.typ ty)
+    | TConstraint(ty, cs) ->
+        TConstraint(tr.typ ty, Fmap.(list (tr.typ * tr.typ)) cs)
+    | TOpen -> TOpen
+
+  let gen_var tr x = Id.map_typ tr.typ x
+
+  let gen_pat tr p =
+    let typ = tr.typ p.pat_typ in
+    let desc =
+      match p.pat_desc with
+      | PAny -> PAny
+      | PNondet -> PNondet
+      | PVar x -> PVar (tr.var x)
+      | PAlias(p,x) -> PAlias(tr.pat p, tr.var x)
+      | PConst t -> PConst (tr.term t)
+      | PConstr(b,s,ps) -> PConstr(b, s, List.map tr.pat ps)
+      | PNil -> PNil
+      | PCons(p1,p2) -> PCons(tr.pat p1, tr.pat p2)
+      | PTuple ps -> PTuple (List.map tr.pat ps)
+      | PRecord pats -> PRecord Fmap.(list (snd tr.pat) pats)
+      | POr(p1,p2) -> POr(tr.pat p1, tr.pat p2)
+      | PNone -> PNone
+      | PSome p -> PSome (tr.pat p)
+      | PWhen(p,cond) -> PWhen(tr.pat p, tr.term cond)
+      | PLazy p -> PLazy (tr.pat p)
+      | PEval(x,t,p) -> PEval(tr.var x, tr.term t, tr.pat p)
+    in
+    let pat_attr =
+      List.L.map p.pat_attr ~f:(function
+        | PABV xs -> PABV (List.map tr.var xs)
+        | PAFV xs -> PAFV (List.map tr.var xs))
+    in
+    {pat_desc=desc; pat_typ=typ; pat_attr}
+
+  let gen_info tr = function
+    | InfoInt n -> InfoInt n
+    | InfoString s -> InfoString s
+    | InfoId x -> InfoId (tr.var x)
+    | InfoTerm t -> InfoTerm (tr.term t)
+    | InfoIdTerm(x, t) -> InfoIdTerm(tr.var x, tr.term t)
+
+  let gen_const tr c =
+    match c with
+    | Unit -> Unit
+    | True -> True
+    | False -> False
+    | Int n -> Int n
+    | Char c -> Char c
+    | String s -> String s
+    | Float s -> Float s
+    | Int32 n -> Int32 n
+    | Int64 n -> Int64 n
+    | Nativeint n -> Nativeint n
+    | CPS_result -> CPS_result
+    | Rand(typ,b) -> Rand(tr.typ typ,b)
+    | Empty -> Empty
+    | Dummy ty -> Dummy (tr.typ ty)
+
+  let gen_decl tr decl =
+    match decl with
+    | Decl_let defs -> Decl_let (List.map (Pair.map tr.var tr.term) defs)
+    | Decl_type decls -> Decl_type Fmap.(list (snd (snd tr.typ)) decls)
+    | Type_ext(Ext_type(s, (params, {ext_row_path; ext_row_args; ext_row_ret}))) ->
+        let ext_row_args = List.map tr.typ ext_row_args in
+        let ext_row_ret = Option.map tr.typ ext_row_ret in
+        let ext = {ext_row_path; ext_row_args; ext_row_ret} in
+        Type_ext(Ext_type(s, (params, ext)))
+    | Type_ext(Ext_rebind(s1,s2)) -> Type_ext(Ext_rebind(s1, s2))
+    | Decl_multi decls -> Decl_multi (List.map tr.decl decls)
+    | Include t -> Include (tr.term t)
+
+  let gen_lid tr (lid:lid) : lid =
+    match lid with
+    | LId x -> LId (tr.var x)
+    | LDot(p,s) -> LDot(tr.lid p, s)
+    | LApp(p1,p2) -> LApp(tr.lid p1, tr.lid p2)
+
+  let gen_desc tr desc =
+    let tt = tr.term in
+    match desc with
+    | End_of_definitions -> End_of_definitions
+    | Const c -> Const(tr.const c)
+    | Var y -> Var (tr.lid y)
+    | Fun(y, t) -> Fun(tr.var y, tt t)
+    | App(t1, ts) -> App(tt t1, List.map tt ts)
+    | If(t1, t2, t3) -> If(tt t1, tt t2, tt t3)
+    | Local(decl, t2) -> Local(tr.decl decl, tt t2)
+    | BinOp(op, t1, t2) -> BinOp(op, tt t1, tt t2)
+    | Not t1 -> Not (tt t1)
+    | Event(s,b) -> Event(s,b)
+    | Record fields -> Record (List.map (Pair.map_snd tt) fields)
+    | Field(t1,s) -> Field(tt t1, s)
+    | SetField(t1,s,t2) -> SetField(tt t1,s,tt t2)
+    | Nil -> Nil
+    | Cons(t1,t2) -> Cons(tt t1, tt t2)
+    | Constr(b,s,ts) -> Constr(b, s, List.map tt ts)
+    | Match(t1,pats) -> Match(tt t1, List.map (Pair.map tr.pat tt) pats)
+    | Raise t -> Raise (tt t)
+    | TryWith(t1,t2) -> TryWith(tt t1, tt t2)
+    | Tuple ts -> Tuple (List.map tt ts)
+    | Proj(i,t) -> Proj(i, tt t)
+    | Bottom -> Bottom
+    | Label(info, t) -> Label(tr.info info, tt t)
+    | Ref t -> Ref(tt t)
+    | Deref t -> Deref(tt t)
+    | SetRef(t1, t2) -> SetRef(tt t1, tt t2)
+    | TNone -> TNone
+    | TSome t -> TSome (tt t)
+    | Lazy t -> Lazy (tt t)
+    | Module decls -> Module (List.map tr.decl decls)
+    | Pack t -> Pack (tt t)
+    | Unpack t -> Unpack (tt t)
+    | MemSet(t1, t2) -> MemSet(tt t1, tt t2)
+    | AddSet(t1, t2) -> AddSet(tt t1, tt t2)
+    | Subset(t1, t2) -> Subset(tt t1, tt t2)
+    | Forall(y, t) -> Forall(tr.var y, tt t)
+    | Exists(y, t) -> Exists(tr.var y, tt t)
+
+  let gen_attr tr attrs =
+    let aux = function
+      | AFV xs -> AFV (List.map tr.var xs)
+      | a -> a
+    in
+    List.map aux attrs
+
+  let gen_term tr t =
+    {desc = tr.desc (desc t); typ = tr.typ t.typ; attr=tr.attr t.attr}
+
+
+  let make () =
+    let tr =
+      {term      = Fun.id;
+       term_rec  = Fun.id;
+       desc      = Fun.id;
+       desc_rec  = Fun.id;
+       typ       = Fun.id;
+       typ_rec   = Fun.id;
+       var       = Fun.id;
+       lid       = Fun.id;
+       pat       = Fun.id;
+       pat_rec   = Fun.id;
+       info      = Fun.id;
+       info_rec  = Fun.id;
+       decl      = Fun.id;
+       decl_rec  = Fun.id;
+       const     = Fun.id;
+       const_rec = Fun.id;
+       attr      = Fun.id}
+    in
+    tr.term      <- gen_term tr;
+    tr.term_rec  <- gen_term tr;
+    tr.desc      <- gen_desc tr;
+    tr.desc_rec  <- gen_desc tr;
+    tr.typ       <- gen_typ tr;
+    tr.typ_rec   <- gen_typ tr;
+    tr.var       <- gen_var tr;
+    tr.lid       <- gen_lid tr;
+    tr.pat       <- gen_pat tr;
+    tr.pat_rec   <- gen_pat tr;
+    tr.info      <- gen_info tr;
+    tr.info_rec  <- gen_info tr;
+    tr.decl      <- gen_decl tr;
+    tr.decl_rec  <- gen_decl tr;
+    tr.const     <- gen_const tr;
+    tr.const_rec <- gen_const tr;
+    tr.attr      <- gen_attr tr;
+    tr
+
+  let id = make ()
 end
 
 
-let safe_attr = [ANotFail;ATerminate]
-let pure_attr = [ANotFail; ATerminate; ADeterministic]
-let const_attr = pure_attr
+module Tr2 = struct
+  type 'a t =
+    {mutable term:      'a -> term -> term;
+     mutable term_rec:  'a -> term -> term;
+     mutable desc:      'a -> desc -> desc;
+     mutable desc_rec:  'a -> desc -> desc;
+     mutable typ:       'a -> typ -> typ;
+     mutable typ_rec:   'a -> typ -> typ;
+     mutable var:       'a -> id -> id;
+     mutable lid:       'a -> lid -> lid;
+     mutable pat:       'a -> pattern -> pattern;
+     mutable pat_rec:   'a -> pattern -> pattern;
+     mutable info:      'a -> info -> info;
+     mutable info_rec:  'a -> info -> info;
+     mutable decl:      'a -> declaration -> declaration;
+     mutable decl_rec:  'a -> declaration -> declaration;
+     mutable const:     'a -> const -> const;
+     mutable const_rec: 'a -> const -> const;
+     mutable attr:      'a -> attr list -> attr list}
 
-type trans =
-  {mutable tr_term:      term -> term;
-   mutable tr_term_rec:  term -> term;
-   mutable tr_desc:      desc -> desc;
-   mutable tr_desc_rec:  desc -> desc;
-   mutable tr_typ:       typ -> typ;
-   mutable tr_typ_rec:   typ -> typ;
-   mutable tr_var:       id -> id;
-   mutable tr_var_rec:   id -> id;
-   mutable tr_pat:       pattern -> pattern;
-   mutable tr_pat_rec:   pattern -> pattern;
-   mutable tr_info:      info -> info;
-   mutable tr_info_rec:  info -> info;
-   mutable tr_decl:      declaration -> declaration;
-   mutable tr_decl_rec:  declaration -> declaration;
-   mutable tr_const:     const -> const;
-   mutable tr_const_rec: const -> const;
-   mutable tr_attr:      attr list -> attr list}
+  let gen_typ tr env ty =
+    let f = tr.typ env in
+    match ty with
+    | TBase b -> TBase b
+    | TVar(_,{contents=Some typ},_) -> f typ
+    | TVar(b,x,id) -> TVar(b,x,id)
+    | TFun(x,typ) -> TFun(tr.var env x, f typ)
+    | TFuns(xs,typ) -> TFuns(List.map (Id.map_typ @@ f) xs, f typ)
+    | TConstr(c, typs) -> TConstr(c, List.map f typs)
+    | TTuple xs -> TTuple (List.map (tr.var env) xs)
+    | TAttr(attr, typ) ->
+        let aux a =
+          match a with
+          | TAPred(x,ps) -> TAPred(tr.var env x, List.map (tr.term env) ps)
+          | TARefPred(x,p) -> TARefPred(tr.var env x, tr.term env p)
+          | TAPureFun -> TAPureFun
+          | TAEffect e -> TAEffect e
+          | TAPredShare x -> TAPredShare x
+          | TAId(s,n) -> TAId(s,n)
+          | TARaise ty -> TARaise (f ty)
+        in
+        TAttr(List.map aux attr, f typ)
+    | TVariant(poly,rows) ->
+        let rows =
+          rows
+          |> List.map (fun {row_constr; row_args; row_ret} ->
+                 let row_args = List.map f row_args in
+                 let row_ret = Option.map f row_ret in
+                 {row_constr; row_args; row_ret})
+        in
+        TVariant(poly, rows)
+    | TRecord fields -> TRecord Fmap.(list (snd (snd f)) fields)
+    | TModSig {sig_types; sig_values; sig_ext} ->
+        let sig_types = Fmap.(list (list (snd (snd f)))) sig_types in
+        let sig_values = List.map (tr.var env) sig_values in
+        let sig_ext =
+          let tr_row {ext_row_path; ext_row_args; ext_row_ret} =
+            let ext_row_args = List.map f ext_row_args in
+            let ext_row_ret = Option.map f ext_row_ret in
+            {ext_row_path; ext_row_args; ext_row_ret}
+          in
+          Fmap.(list (snd (snd tr_row))) sig_ext
+        in
+        TModSig {sig_types; sig_values; sig_ext}
+    | TModLid m -> TModLid m
+    | TPackage ty -> TPackage (f ty)
+    | TPoly(vars, ty) -> TPoly(vars, f ty)
+    | TConstraint(ty, cs) ->
+        TConstraint(f ty, Fmap.(list (f * f)) cs)
+    | TOpen -> TOpen
 
-let trans_typ tr = function
-  | TBase b -> TBase b
-  | TVar({contents=None} as x,id) -> TVar(x,id)
-  | TVar({contents=Some typ},_) -> tr.tr_typ typ
-  | TFun(x,typ) -> TFun(Id.map_typ tr.tr_typ x, tr.tr_typ typ)
-  | TFuns(xs,typ) -> TFuns(List.map (Id.map_typ tr.tr_typ) xs, tr.tr_typ typ)
-  | TApp(c, typs) -> TApp(c, List.map tr.tr_typ typs)
-  | TTuple xs -> TTuple (List.map tr.tr_var xs)
-  | TData s -> TData s
-  | TAttr(attr, typ) ->
-      let tr_attr a =
+  let gen_var tr env x = Id.map_typ (tr.typ env) x
+
+  let rec gen_lid tr env lid =
+    match lid with
+    | LId x -> LId (tr.var env x)
+    | LDot(p,s) -> LDot(gen_lid tr env p, s)
+    | LApp(p1,p2) -> LApp(gen_lid tr env p1, gen_lid tr env p2)
+
+  let gen_pat tr env p =
+    let typ = tr.typ env p.pat_typ in
+    let desc =
+      match p.pat_desc with
+      | PAny -> PAny
+      | PNondet -> PNondet
+      | PVar x -> PVar (tr.var env x)
+      | PAlias(p,x) -> PAlias(tr.pat env p, tr.var env x)
+      | PConst t -> PConst (tr.term env t)
+      | PConstr(b,s,ps) -> PConstr(b, s, List.map (tr.pat env) ps)
+      | PNil -> PNil
+      | PCons(p1,p2) -> PCons(tr.pat env p1, tr.pat env p2)
+      | PTuple ps -> PTuple (List.map (tr.pat env) ps)
+      | PRecord pats -> PRecord Fmap.(list (snd @@ tr.pat env) pats)
+      | POr(p1,p2) -> POr(tr.pat env p1, tr.pat env p2)
+      | PNone -> PNone
+      | PSome p -> PSome (tr.pat env p)
+      | PWhen(p,cond) -> PWhen(tr.pat env p, tr.term env cond)
+      | PLazy p -> PLazy (tr.pat env p)
+      | PEval(x,t,p) -> PEval(tr.var env x, tr.term env t, tr.pat env p)
+    in
+    let pat_attr =
+      List.L.map p.pat_attr ~f:(function
+        | PABV xs -> PABV (List.map (tr.var env) xs)
+        | PAFV xs -> PAFV (List.map (tr.var env) xs))
+    in
+    {pat_desc=desc; pat_typ=typ; pat_attr}
+
+  let gen_info tr env = function
+    | InfoInt n -> InfoInt n
+    | InfoString s -> InfoString s
+    | InfoId x -> InfoId (tr.var env x)
+    | InfoTerm t -> InfoTerm (tr.term env t)
+    | InfoIdTerm(x, t) -> InfoIdTerm(tr.var env x, tr.term env t)
+
+  let gen_const tr env c =
+    match c with
+    | Unit -> Unit
+    | True -> True
+    | False -> False
+    | Int n -> Int n
+    | Char c -> Char c
+    | String s -> String s
+    | Float s -> Float s
+    | Int32 n -> Int32 n
+    | Int64 n -> Int64 n
+    | Nativeint n -> Nativeint n
+    | CPS_result -> CPS_result
+    | Rand(typ,b) -> Rand(tr.typ env typ, b)
+    | Empty -> Empty
+    | Dummy ty -> Dummy (tr.typ env ty)
+
+  let gen_decl tr env decl =
+    match decl with
+    | Decl_let defs -> Decl_let (List.map (Pair.map (tr.var env) (tr.term env)) defs)
+    | Decl_type decls -> Decl_type (List.map Pair.(map_snd (map_snd (tr.typ env))) decls)
+    | Type_ext(Ext_type(s, (params, {ext_row_path; ext_row_args; ext_row_ret}))) ->
+        let ext_row_args = List.map (tr.typ env) ext_row_args in
+        let ext_row_ret = Option.map (tr.typ env) ext_row_ret in
+        let ext = {ext_row_path; ext_row_args; ext_row_ret} in
+        Type_ext(Ext_type(s, (params, ext)))
+    | Type_ext(Ext_rebind(s1,s2)) -> Type_ext(Ext_rebind(s1, s2))
+    | Include t -> Include (tr.term env t)
+    | Decl_multi decls -> Decl_multi (List.map (tr.decl env) decls)
+
+  let gen_desc tr env desc =
+    let tt = tr.term env in
+    match desc with
+    | End_of_definitions -> End_of_definitions
+    | Const c -> Const(tr.const env c)
+    | Var y -> Var (tr.lid env y)
+    | Fun(y, t) -> Fun(tr.var env y, tt t)
+    | App(t1, ts) -> App(tt t1, List.map tt ts)
+    | If(t1, t2, t3) -> If(tt t1, tt t2, tt t3)
+    | Local(decl, t2) -> _Local (tr.decl env decl) (tt t2)
+    | BinOp(op, t1, t2) -> BinOp(op, tt t1, tt t2)
+    | Not t1 -> Not (tt t1)
+    | Event(s,b) -> Event(s,b)
+    | Record fields -> Record Fmap.(list (snd tt) fields)
+    | Field(t1,s) -> Field(tt t1,s)
+    | SetField(t1,s,t2) -> SetField(tt t1,s,tt t2)
+    | Nil -> Nil
+    | Cons(t1,t2) -> Cons(tt t1, tt t2)
+    | Constr(b,s,ts) -> Constr(b, s, List.map (tt) ts)
+    | Match(t1,pats) -> Match(tt t1, List.map (Pair.map (tr.pat env) tt) pats)
+    | Raise t -> Raise (tt t)
+    | TryWith(t1,t2) -> TryWith(tt t1, tt t2)
+    | Tuple ts -> Tuple (List.map (tt) ts)
+    | Proj(i,t) -> Proj(i, tt t)
+    | Bottom -> Bottom
+    | Label(info, t) -> Label(tr.info env info, tt t)
+    | Ref t -> Ref (tt t)
+    | Deref t -> Deref (tt t)
+    | SetRef(t1,t2) -> SetRef(tt t1, tt t2)
+    | TNone -> TNone
+    | TSome t -> TSome (tt t)
+    | Lazy t -> Lazy (tt t)
+    | Module decls -> Module (List.map (tr.decl env) decls)
+    | Pack t -> Pack (tt t)
+    | Unpack t -> Unpack (tt t)
+    | MemSet(t1, t2) -> MemSet(tt t1, tt t2)
+    | AddSet(t1, t2) -> AddSet(tt t1, tt t2)
+    | Subset(t1, t2) -> Subset(tt t1, tt t2)
+    | Forall(y, t) -> Forall(tr.var env y, tt t)
+    | Exists(y, t) -> Exists(tr.var env y, tt t)
+
+  let gen_attr tr env attrs =
+    let aux = function
+      | AFV xs -> AFV (List.map (tr.var env) xs)
+      | a -> a
+    in
+    List.map aux attrs
+
+  let gen_term tr env t =
+    {desc = tr.desc env (desc t); typ = tr.typ env t.typ; attr = tr.attr env t.attr}
+
+
+  let make () =
+    let id' _ = Fun.id in
+    let tr =
+      {term      = id';
+       term_rec  = id';
+       desc      = id';
+       desc_rec  = id';
+       typ       = id';
+       typ_rec   = id';
+       var       = id';
+       lid       = id';
+       pat       = id';
+       pat_rec   = id';
+       info      = id';
+       info_rec  = id';
+       decl      = id';
+       decl_rec  = id';
+       const     = id';
+       const_rec = id';
+       attr      = id'}
+    in
+    tr.term      <- gen_term tr;
+    tr.term_rec  <- gen_term tr;
+    tr.desc      <- gen_desc tr;
+    tr.desc_rec  <- gen_desc tr;
+    tr.typ       <- gen_typ tr;
+    tr.typ_rec   <- gen_typ tr;
+    tr.var       <- gen_var tr;
+    tr.lid       <- gen_lid tr;
+    tr.pat       <- gen_pat tr;
+    tr.pat_rec   <- gen_pat tr;
+    tr.info      <- gen_info tr;
+    tr.info_rec  <- gen_info tr;
+    tr.decl      <- gen_decl tr;
+    tr.decl_rec  <- gen_decl tr;
+    tr.const     <- gen_const tr;
+    tr.const_rec <- gen_const tr;
+    tr.attr      <- gen_attr tr;
+    tr
+
+  let to_Tr (tr : 'a t) x : Tr.t =
+    {term      = tr.term x;
+     term_rec  = tr.term_rec x;
+     desc      = tr.desc x;
+     desc_rec  = tr.desc_rec x;
+     typ       = tr.typ x;
+     typ_rec   = tr.typ_rec x;
+     var       = tr.var x;
+     lid       = tr.lid x;
+     pat       = tr.pat x;
+     pat_rec   = tr.pat_rec x;
+     info      = tr.info x;
+     info_rec  = tr.info_rec x;
+     decl      = tr.decl x;
+     decl_rec  = tr.decl_rec x;
+     const     = tr.const x;
+     const_rec = tr.const_rec x;
+     attr      = tr.attr x}
+end
+
+
+module Col = struct
+  type 'a t =
+    {mutable term:      term -> 'a;
+     mutable term_rec:  term -> 'a;
+     mutable desc:      desc -> 'a;
+     mutable desc_rec:  desc -> 'a;
+     mutable typ:       typ -> 'a;
+     mutable typ_rec:   typ -> 'a;
+     mutable var:       id -> 'a;
+     mutable lid:       lid -> 'a;
+     mutable pat:       pattern -> 'a;
+     mutable pat_rec:   pattern -> 'a;
+     mutable info:      info -> 'a;
+     mutable info_rec:  info -> 'a;
+     mutable decl:      declaration -> 'a;
+     mutable decl_rec:  declaration -> 'a;
+     mutable const:     const -> 'a;
+     mutable const_rec: const -> 'a;
+     mutable attr:      attr list -> 'a;
+     mutable app:       'a -> 'a -> 'a;
+     mutable empty:     'a}
+
+  let gen_list ~col ?(init=col.empty) ~f xs =
+    List.fold_left (fun acc typ -> col.app acc @@ f typ) init xs
+
+  let gen_typ col typ =
+    let (++) = col.app in
+    let ce = col.empty in
+    let cty = col.typ in
+    match typ with
+    | TBase _ -> ce
+    | TVar(_,{contents=None},_) -> ce
+    | TVar(_,{contents=Some typ},_) -> cty typ
+    | TFun(x,typ) -> cty (Id.typ x) ++ cty typ
+    | TFuns(xs,typ) -> gen_list ~col ~init:(cty typ) ~f:col.var xs
+    | TConstr(_, typs) -> gen_list ~col ~f:cty typs
+    | TTuple xs -> gen_list ~col ~f:col.var xs
+    | TAttr(attr, typ) ->
+        let aux acc a =
+          match a with
+          | TAPred(x,ps) ->
+              let acc' = col.var x ++ acc in
+              List.fold_left (fun acc p -> acc ++ col.term p) acc' ps
+          | TARefPred(x,p) -> col.var x ++ col.term p ++ acc
+          | TAPureFun -> acc
+          | TAEffect _ -> acc
+          | TAPredShare _ -> acc
+          | TAId _ -> acc
+          | TARaise ty -> cty ty ++ acc
+        in
+        List.fold_left aux (cty typ) attr
+    | TVariant(_,rows) ->
+        gen_list ~col rows
+          ~f:(fun {row_args; row_ret} ->
+            gen_list ~col ~f:cty (Option.to_list row_ret @ row_args))
+    | TRecord fields -> gen_list ~col ~f:(snd |- snd |- cty) fields
+    | TModSig {sig_types; sig_values; sig_ext} ->
+        let aux {ext_row_args; ext_row_ret} =
+          gen_list ~col ~f:cty (Option.to_list ext_row_ret @ ext_row_args)
+        in
+        gen_list ~col ~f:(gen_list ~init:ce ~col ~f:(snd |- snd |- cty)) sig_types
+        ++ gen_list ~col ~f:col.var sig_values
+        ++ gen_list ~init:ce ~col ~f:(snd |- snd |- aux) sig_ext
+    | TModLid _ -> ce
+    | TPackage ty -> cty ty
+    | TPoly(_, ty) -> cty ty
+    | TConstraint(ty, cs) ->
+        cty ty ++ gen_list ~col ~f:(fun (p,ty) -> cty p ++ cty ty) cs
+    | TOpen -> ce
+
+  let gen_var col x = col.typ (Id.typ x)
+
+  let gen_pat col p =
+    let (++) = col.app in
+    let r1 = col.typ p.pat_typ in
+    let r2 =
+      match p.pat_desc with
+      | PAny -> col.empty
+      | PNondet -> col.empty
+      | PVar x -> col.var x
+      | PAlias(p,x) -> col.pat p ++ col.var x
+      | PConst t -> col.term t
+      | PConstr(_,_,ps) -> gen_list ~col ~f:col.pat ps
+      | PNil -> col.empty
+      | PCons(p1,p2) -> col.pat p1 ++ col.pat p2
+      | PTuple ps -> gen_list ~col ~f:col.pat ps
+      | PRecord pats -> gen_list ~col ~f:(snd |- col.pat) pats
+      | POr(p1,p2) -> col.pat p1 ++ col.pat p2
+      | PNone -> col.empty
+      | PSome p -> col.pat p
+      | PWhen(p,cond) -> col.pat p ++ col.term cond
+      | PLazy p -> col.pat p
+      | PEval(x,t,p) -> col.var x ++ col.term t ++ col.pat p
+    in
+    r1 ++ r2
+
+  let gen_info col info =
+    let (++) = col.app in
+    match info with
+    | InfoInt _ -> col.empty
+    | InfoString _ -> col.empty
+    | InfoId x -> col.var x
+    | InfoTerm t -> col.term t
+    | InfoIdTerm(x, t) -> col.var x ++ col.term t
+
+  let gen_const col c =
+    match c with
+    | Rand(typ,_) -> col.typ typ
+    | _ -> col.empty
+
+  let gen_decl col decl =
+    let (++) = col.app in
+    match decl with
+    | Decl_let defs ->
+        let aux acc (x,t) = acc ++ col.var x ++ col.term t in
+        List.fold_left aux col.empty defs
+    | Decl_type decls -> gen_list ~col ~f:(snd |- snd |- col.typ) decls
+    | Type_ext(Ext_type(_, (_, row))) ->
+        gen_list ~col ~f:col.typ (Option.to_list row.ext_row_ret @ row.ext_row_args)
+    | Type_ext(Ext_rebind(_,_)) -> col.empty
+    | Include t -> col.term t
+    | Decl_multi decls -> gen_list ~col ~f:col.decl decls
+
+  let rec gen_lid col (lid:lid) =
+    let (++) = col.app in
+    match lid with
+    | LId x -> col.var x
+    | LDot(p,_) -> gen_lid col p
+    | LApp(p1,p2) -> gen_lid col p1 ++ gen_lid col p2
+
+  let gen_desc col desc =
+    let (++) = col.app in
+    let ct = col.term in
+    match desc with
+    | End_of_definitions -> col.empty
+    | Const c -> col.const c
+    | Var y -> gen_lid col y
+    | Fun(y, t) -> col.var y ++ ct t
+    | App(t1, ts) -> gen_list ~col ~f:ct ~init:(ct t1) ts
+    | If(t1, t2, t3) -> ct t1 ++ ct t2 ++ ct t3
+    | Local(decl, t2) -> ct t2 ++ col.decl decl
+    | BinOp(_, t1, t2) -> ct t1 ++ ct t2
+    | Not t1 -> ct t1
+    | Event _ -> col.empty
+    | Record fields -> gen_list ~col ~f:(snd |- ct) fields
+    | Field(t1,_) -> ct t1
+    | SetField(t1,_,t2) -> ct t1 ++ ct t2
+    | Nil -> col.empty
+    | Cons(t1,t2) -> ct t1 ++ ct t2
+    | Constr(_,_,ts) -> gen_list ~col ~f:ct ts
+    | Match(t1,pats) ->
+        let aux acc (pat,t1) = acc ++ col.pat pat ++ ct t1 in
+        List.fold_left aux (ct t1) pats
+    | Raise t -> ct t
+    | TryWith(t1,t2) -> ct t1 ++ ct t2
+    | Tuple ts -> gen_list ~col ~f:ct ts
+    | Proj(_,t) -> ct t
+    | Bottom -> col.empty
+    | Label(info, t) -> col.info info ++ ct t
+    | Ref t -> ct t
+    | Deref t -> ct t
+    | SetRef(t1,t2) -> ct t1 ++ ct t2
+    | TNone -> col.empty
+    | TSome t -> ct t
+    | Lazy t -> ct t
+    | Module decls -> gen_list ~col ~f:col.decl decls
+    | Pack t -> ct t
+    | Unpack t -> ct t
+    | MemSet(t1, t2) -> ct t1 ++ ct t2
+    | AddSet(t1, t2) -> ct t1 ++ ct t2
+    | Subset(t1, t2) -> ct t1 ++ ct t2
+    | Forall(x, t) -> col.var x ++ ct t
+    | Exists(x, t) -> col.var x ++ ct t
+
+  let gen_term col t =
+    let (++) = col.app in
+    col.desc (desc t) ++ col.typ t.typ ++ col.attr t.attr
+
+
+  let make empty app =
+    let f _ = empty in
+    let col =
+      {term      = f;
+       term_rec  = f;
+       desc      = f;
+       desc_rec  = f;
+       typ       = f;
+       typ_rec   = f;
+       var       = f;
+       lid       = f;
+       pat       = f;
+       pat_rec   = f;
+       info      = f;
+       info_rec  = f;
+       decl      = f;
+       decl_rec  = f;
+       const     = f;
+       const_rec = f;
+       attr      = f;
+       app       = app;
+       empty     = empty}
+    in
+    col.term      <- gen_term col;
+    col.term_rec  <- gen_term col;
+    col.desc      <- gen_desc col;
+    col.desc_rec  <- gen_desc col;
+    col.typ       <- gen_typ col;
+    col.typ_rec   <- gen_typ col;
+    col.var       <- gen_var col;
+    col.lid       <- gen_lid col;
+    col.pat       <- gen_pat col;
+    col.pat_rec   <- gen_pat col;
+    col.info      <- gen_info col;
+    col.decl      <- gen_decl col;
+    col.decl_rec  <- gen_decl col;
+    col.const     <- gen_const col;
+    col.const_rec <- gen_const col;
+    col
+end
+
+module Col2 = struct
+  type ('a,'b) t =
+    {mutable term:      'b -> term -> 'a;
+     mutable term_rec:  'b -> term -> 'a;
+     mutable desc:      'b -> desc -> 'a;
+     mutable desc_rec:  'b -> desc -> 'a;
+     mutable typ:       'b -> typ -> 'a;
+     mutable typ_rec:   'b -> typ -> 'a;
+     mutable var:       'b -> id -> 'a;
+     mutable lid:       'b -> lid -> 'a;
+     mutable pat:       'b -> pattern -> 'a;
+     mutable pat_rec:   'b -> pattern -> 'a;
+     mutable info:      'b -> info -> 'a;
+     mutable info_rec:  'b -> info -> 'a;
+     mutable decl:      'b -> declaration -> 'a;
+     mutable decl_rec:  'b -> declaration -> 'a;
+     mutable const:     'b -> const -> 'a;
+     mutable const_rec: 'b -> const -> 'a;
+     mutable attr:      'b -> attr list -> 'a;
+     mutable app:       'a -> 'a -> 'a;
+     mutable empty:     'a}
+
+  let gen_list ~col ?(init=col.empty) ~f xs =
+    List.fold_left (fun acc typ -> col.app acc @@ f typ) init xs
+
+  let gen_typ col env typ =
+    let (++) = col.app in
+    let ce = col.empty in
+    let cty = col.typ env in
+    match typ with
+    | TBase _ -> ce
+    | TVar(_,{contents=None},_) -> ce
+    | TVar(_,{contents=Some typ},_) -> cty typ
+    | TFun(x,typ) -> col.var env x ++ cty typ
+    | TFuns(xs,typ) -> gen_list ~col ~f:(col.var env) ~init:(cty typ) xs
+    | TConstr(_,typs) -> gen_list ~col ~f:cty typs
+    | TTuple xs -> gen_list ~col ~f:(col.var env) xs
+    | TAttr(attr, typ) ->
+        let aux acc a =
+          match a with
+          | TAPred(x,ps) ->
+              let init = col.var env x ++ acc in
+              gen_list ~col ~f:(col.term env) ~init ps
+          | TARefPred(x,p) ->
+              col.var env x ++ col.term env p ++ acc
+          | TAPureFun -> acc
+          | TAEffect _ -> acc
+          | TAPredShare _ -> acc
+          | TAId _ -> acc
+          | TARaise ty -> cty ty ++ acc
+        in
+        List.fold_left aux (cty typ) attr
+    | TVariant(_,rows) -> List.fold_left (fun init row -> gen_list ~col ~f:cty ~init (Option.to_list row.row_ret @ row.row_args)) ce rows
+    | TRecord fields -> gen_list ~col ~f:(snd |- snd |- cty) fields
+    | TModSig {sig_types; sig_values} ->
+        gen_list ~col ~f:(gen_list ~col ~f:(snd |- snd |- cty) ~init:col.empty) sig_types ++ gen_list ~col ~f:(col.var env) sig_values
+    | TModLid _ -> ce
+    | TPackage ty -> cty ty
+    | TPoly(_, ty) -> cty ty
+    | TConstraint(ty, cs) ->
+        cty ty ++ gen_list ~col ~f:(fun (p,ty) -> cty p ++ cty ty) cs
+    | TOpen -> ce
+
+  let gen_var col env x = col.typ env (Id.typ x)
+
+  let gen_pat col env p =
+    let (++) = col.app in
+    let r1 = col.typ env p.pat_typ in
+    let r2 =
+      match p.pat_desc with
+      | PAny -> col.empty
+      | PNondet -> col.empty
+      | PVar x -> col.var env x
+      | PAlias(p,x) -> col.pat env p ++ col.var env x
+      | PConst t -> col.term env t
+      | PConstr(_,_,ps) -> List.fold_left (fun acc p -> acc ++ col.pat env p) col.empty ps
+      | PNil -> col.empty
+      | PCons(p1,p2) -> col.pat env p1 ++ col.pat env p2
+      | PTuple ps -> List.fold_left (fun acc p -> acc ++ col.pat env p) col.empty ps
+      | PRecord pats -> List.fold_left (fun acc (_,p) -> acc ++ col.pat env p) col.empty pats
+      | POr(p1,p2) -> col.pat env p1 ++ col.pat env p2
+      | PNone -> col.empty
+      | PSome p -> col.pat env p
+      | PWhen(p,cond) -> col.pat env p ++ col.term env cond
+      | PLazy p -> col.pat env p
+      | PEval(x,t,p) -> col.var env x ++ col.term env t ++ col.pat env p
+    in
+    col.app r1 r2
+
+  let gen_info col env = function
+    | InfoInt _ -> col.empty
+    | InfoString _ -> col.empty
+    | InfoId x -> col.var env x
+    | InfoTerm t -> col.term env t
+    | InfoIdTerm(x, t) -> col.app (col.var env x) (col.term env t)
+
+  let gen_const col env c =
+    match c with
+    | Rand(typ,_) -> col.typ env typ
+    | _ -> col.empty
+
+  let gen_decl col env decl =
+    match decl with
+    | Decl_let defs ->
+        let aux acc (x,t) =
+          col.app acc @@
+          col.app (col.var env x) (col.term env t)
+        in
+        List.fold_left aux col.empty defs
+    | Decl_type decls -> gen_list ~col ~f:(snd |- snd |- col.typ env) decls
+    | Type_ext(Ext_type(_, (_, row))) -> gen_list ~col ~f:(col.typ env) (Option.to_list row.ext_row_ret @ row.ext_row_args)
+    | Type_ext(Ext_rebind(_, _)) -> col.empty
+    | Include t -> col.term env t
+    | Decl_multi decls -> gen_list ~col ~f:(col.decl env) decls
+
+  let rec gen_lid col env (lid:lid) =
+    let (++) = col.app in
+    match lid with
+    | LId x -> col.var env x
+    | LDot(p,_) -> gen_lid col env p
+    | LApp(p1,p2) -> gen_lid col env p1 ++ gen_lid col env p2
+
+  let gen_desc col env desc =
+    let (++) = col.app in
+    let ct = col.term env in
+    match desc with
+    | End_of_definitions -> col.empty
+    | Const c -> col.const env c
+    | Var y -> gen_lid col env y
+    | Fun(y, t) -> col.var env y ++ ct t
+    | App(t1, ts) -> List.fold_left (fun acc t -> acc ++ ct t) (ct t1) ts
+    | If(t1, t2, t3) -> ct t1 ++ ct t2 ++ ct t3
+    | Local(decl, t2) -> ct t2 ++ col.decl env decl
+    | BinOp(_, t1, t2) -> ct t1 ++ ct t2
+    | Not t1 -> ct t1
+    | Event _ -> col.empty
+    | Record fields -> List.fold_left (fun acc (_,t1) -> acc ++ ct t1) col.empty fields
+    | Field(t1,_) -> ct t1
+    | SetField(t1,_,t2) -> ct t1 ++ ct t2
+    | Nil -> col.empty
+    | Cons(t1,t2) -> ct t1 ++ ct t2
+    | Constr(_,_,ts) -> List.fold_left (fun acc t -> acc ++ ct t) col.empty ts
+    | Match(t1,pats) ->
+        let aux acc (pat,t1) = acc ++ col.pat env pat ++ ct t1 in
+        List.fold_left aux (ct t1) pats
+    | Raise t -> ct t
+    | TryWith(t1,t2) -> ct t1 ++ ct t2
+    | Tuple ts -> List.fold_left (fun acc t -> acc ++ ct t) col.empty ts
+    | Proj(_,t) -> ct t
+    | Bottom -> col.empty
+    | Label(info, t) -> col.info env info ++ ct t
+    | Ref t -> ct t
+    | Deref t -> ct t
+    | SetRef(t1,t2) -> ct t1 ++ ct t2
+    | TNone -> col.empty
+    | TSome t -> ct t
+    | Lazy t -> ct t
+    | Module decls -> List.fold_left (fun acc decl -> acc ++ col.decl env decl) col.empty decls
+    | Pack t -> ct t
+    | Unpack t -> ct t
+    | MemSet(t1, t2) -> ct t1 ++ ct t2
+    | AddSet(t1, t2) -> ct t1 ++ ct t2
+    | Subset(t1, t2) -> ct t1 ++ ct t2
+    | Forall(x, t) -> col.var env x ++ ct t
+    | Exists(x, t) -> col.var env x ++ ct t
+
+  let gen_term col env t = col.app (col.desc env (desc t)) (col.typ env t.typ)
+
+
+  let make empty app : ('a,'b) t =
+    let f _ _ = empty in
+    let col =
+      {term      = f;
+       term_rec  = f;
+       desc      = f;
+       desc_rec  = f;
+       typ       = f;
+       typ_rec   = f;
+       var       = f;
+       lid       = f;
+       pat       = f;
+       pat_rec   = f;
+       info      = f;
+       info_rec  = f;
+       const     = f;
+       const_rec = f;
+       decl      = f;
+       decl_rec  = f;
+       attr      = f;
+       app       = app;
+       empty     = empty}
+    in
+    col.term      <- gen_term col;
+    col.term_rec  <- gen_term col;
+    col.desc      <- gen_desc col;
+    col.desc_rec  <- gen_desc col;
+    col.typ       <- gen_typ col;
+    col.typ_rec   <- gen_typ col;
+    col.var       <- gen_var col;
+    col.lid       <- gen_lid col;
+    col.pat       <- gen_pat col;
+    col.pat_rec   <- gen_pat col;
+    col.info      <- gen_info col;
+    col.info_rec  <- gen_info col;
+    col.decl      <- gen_decl col;
+    col.decl_rec  <- gen_decl col;
+    col.const     <- gen_const col;
+    col.const_rec <- gen_const col;
+    col
+end
+
+
+module Iter = struct
+  let make () = Col.make () Fun.ignore2
+end
+
+module Iter2 = struct
+  let make () = Col2.make () Fun.ignore2
+end
+
+
+module Tr_col2 = struct
+  type ('a,'b) t =
+    {mutable term:      'b -> term          -> 'a * term;
+     mutable term_rec:  'b -> term          -> 'a * term;
+     mutable desc:      'b -> desc          -> 'a * desc;
+     mutable desc_rec:  'b -> desc          -> 'a * desc;
+     mutable typ:       'b -> typ           -> 'a * typ;
+     mutable typ_rec:   'b -> typ           -> 'a * typ;
+     mutable var:       'b -> id            -> 'a * id;
+     mutable lid:       'b -> lid           -> 'a * lid;
+     mutable pat:       'b -> pattern       -> 'a * pattern;
+     mutable pat_rec:   'b -> pattern       -> 'a * pattern;
+     mutable info:      'b -> info          -> 'a * info;
+     mutable info_rec:  'b -> info          -> 'a * info;
+     mutable decl:      'b -> declaration   -> 'a * declaration;
+     mutable decl_rec:  'b -> declaration   -> 'a * declaration;
+     mutable const:     'b -> const         -> 'a * const;
+     mutable const_rec: 'b -> const         -> 'a * const;
+     mutable attr:      'b -> attr list     -> 'a * attr list;
+     mutable app:       'a -> 'a -> 'a;
+     mutable empty:     'a}
+
+  let gen_list tc ?(acc=tc.empty) tr_col xs =
+    let aux x acc =
+      let acc',x' = tr_col x in
+      tc.app acc acc', x'
+    in
+    List.fold_right_map aux xs acc
+
+  let gen_option tc tr_col x =
+    match x with
+    | None -> tc.empty, None
+    | Some y ->
+        let acc',y' = tr_col y in
+        acc', Some y'
+
+  let gen_wrap f constr x =
+    let acc,x = f x in
+    acc, constr x
+
+  let gen_wrap_bin (++) =
+    fun constr f1 x1 f2 x2 ->
+      let acc1,x1' = f1 x1 in
+      let acc2,x2' = f2 x2 in
+      acc1 ++ acc2, constr x1' x2'
+
+  let gen_typ tc env ty =
+    let (++) = tc.app in
+    let tce = tc.empty in
+    let tcv = tc.var env in
+    let tcty = tc.typ env in
+    let wrap constr f x = gen_wrap f constr x in
+    let wrap_bin constr f1 x1 f2 x2 = gen_wrap_bin (++) constr f1 x1 f2 x2 in
+    let tc_pair f1 f2 (x,y) = wrap_bin Pair.pair f1 x f2 y in
+    let tc_snd f (x,y) = wrap (Pair.pair x) f y in
+    let tc_list ?acc f ts = gen_list tc f ?acc ts in
+    let tc_option f x =
+      match x with
+      | None -> tce, None
+      | Some y -> wrap Option.some f y
+    in
+    match ty with
+    | TBase b -> tce, TBase b
+    | TVar(_,{contents=Some typ},_) -> tcty typ
+    | TVar(b,x,id) -> tce, TVar(b,x,id)
+    | TFun(x,typ) -> wrap_bin _TFun tcv x tcty typ
+    | TFuns(xs,typ) -> wrap_bin _TFuns (tc_list tcv) xs tcty typ
+    | TConstr(c, typs) -> wrap (_TConstr c) (tc_list tcty) typs
+    | TTuple xs -> wrap _TTuple (tc_list tcv) xs
+    | TAttr(attr, typ) ->
+        let aux a =
+          match a with
+          | TAPred(x,ps) ->
+              let acc,x' = tc.var env x in
+              let acc',ps' = gen_list tc ~acc (tc.term env) ps in
+              acc', TAPred(x',ps')
+          | TARefPred(x,p) ->
+              let acc,x' = tc.var env x in
+              let acc',p' = tc.term env p in
+              acc ++ acc', TARefPred(x',p')
+          | TAPureFun -> tce, TAPureFun
+          | TAEffect e -> tce, TAEffect e
+          | TAPredShare x -> tce, TAPredShare x
+          | TAId(s,n) -> tce, TAId(s,n)
+          | TARaise ty ->
+              let acc,ty' = tcty ty in
+              acc, TARaise ty'
+        in
+        wrap_bin _TAttr (tc_list aux) attr tcty typ
+    | TVariant(poly,rows) ->
+        let tc_row {row_constr; row_args; row_ret} =
+          let acc1,row_args = tc_list tcty row_args in
+          let acc2,row_ret = tc_option tcty row_ret in
+          acc1++acc2, {row_constr; row_args; row_ret}
+        in
+        wrap (_TVariant poly) (tc_list tc_row) rows
+    | TRecord fields ->
+        wrap _TRecord (tc_list (tc_snd (tc_snd tcty))) fields
+    | TModSig {sig_types; sig_values; sig_ext} ->
+        let acc,sig_types = tc_list (tc_list (tc_snd (tc_pair (tc_list tcty) tcty))) sig_types in
+        let acc,sig_values = gen_list tc ~acc (tc.var env) sig_values in
+        let acc,sig_ext =
+          let tc_row {ext_row_path; ext_row_args; ext_row_ret} =
+            let acc,ext_row_ret = tc_option tcty ext_row_ret in
+            let acc,ext_row_args = tc_list ~acc tcty ext_row_args in
+            acc, {ext_row_path; ext_row_args; ext_row_ret}
+          in
+          tc_list (tc_snd (tc_snd tc_row)) ~acc sig_ext
+        in
+        acc, TModSig {sig_types; sig_values; sig_ext}
+    | TModLid _ -> tce, ty
+    | TPackage ty -> wrap _TPackage tcty ty
+    | TPoly(vars, ty) -> wrap (_TPoly vars) tcty ty
+    | TConstraint(ty, cs) ->
+        let acc,ty' = tcty ty in
+        let acc,cs' = tc_list ~acc (tc_pair tcty tcty) cs in
+        acc, TConstraint(ty', cs')
+    | TOpen -> tce, ty
+
+  let gen_var tc env x =
+    let acc,typ' = tc.typ env (Id.typ x) in
+    acc, Id.set_typ x typ'
+
+  let gen_pat tc env p =
+    let (++) = tc.app in
+    let tce = tc.empty in
+    let tcv = tc.var env in
+    let tcp = tc.pat env in
+    let tct = tc.term env in
+    let tc_list ?acc f ts = gen_list tc f ?acc ts in
+    let wrap constr f x = gen_wrap f constr x in
+    let wrap_bin constr f1 x1 f2 x2 = gen_wrap_bin (++) constr f1 x1 f2 x2 in
+    let acc1,typ = tc.typ env p.pat_typ in
+    let acc2,desc =
+      match p.pat_desc with
+      | PAny -> tce, PAny
+      | PNondet -> tce, PNondet
+      | PVar x -> wrap _PVar tcv x
+      | PAlias(p,x) -> wrap_bin _PAlias tcp p tcv x
+      | PConst t -> wrap _PConst tct t
+      | PConstr(b,s,ps) -> wrap (_PConstr b s) (tc_list tcp) ps
+      | PNil -> tce, PNil
+      | PCons(p1,p2) -> wrap_bin _PCons tcp p1 tcp p2
+      | PTuple ps -> wrap _PTuple (tc_list tcp) ps
+      | PRecord pats -> wrap _PRecord (tc_list (fun (s,p) -> wrap (Pair.pair s) tcp p)) pats
+      | POr(p1,p2) -> wrap_bin _POr tcp p1 tcp p2
+      | PNone -> tce, PNone
+      | PSome p -> wrap _PSome tcp p
+      | PWhen(p,cond) -> wrap_bin _PWhen tcp p tct cond
+      | PLazy p -> wrap _PLazy tcp p
+      | PEval(x,t,p) ->
+          let acc1,x' = tc.var env x in
+          let acc2,t' = tc.term env t in
+          let acc3,p' = tc.pat env p in
+          acc1 ++ acc2 ++ acc3, PEval(x', t', p')
+    in
+    let acc3,pat_attr =
+      let tc_pa a =
         match a with
-        | TAPred(x,ps) -> TAPred(tr.tr_var x, List.map tr.tr_term ps)
-        | TARefPred(x,p) -> TARefPred(tr.tr_var x, tr.tr_term p)
-        | TAPureFun -> TAPureFun
-        | TAEffect e -> TAEffect e
-        | TAPredShare x -> TAPredShare x
-        | TAId(s,n) -> TAId(s,n)
-        | TARaise ty -> TARaise (tr.tr_typ ty)
+        | PABV xs -> wrap _PABV (tc_list tcv) xs
+        | PAFV xs -> wrap _PAFV (tc_list tcv) xs
       in
-      TAttr(List.map tr_attr attr, tr.tr_typ typ)
-  | TVariant(poly,labels) -> TVariant(poly, List.map (Pair.map_snd @@ List.map tr.tr_typ) labels)
-  | TRecord fields -> TRecord (List.map (Pair.map_snd @@ Pair.map_snd tr.tr_typ) fields)
-  | TModule {sig_types; sig_values} ->
-      let sig_types = List.map (Pair.map_snd tr.tr_typ) sig_types in
-      let sig_values = List.map tr.tr_var sig_values in
-      TModule {sig_types; sig_values}
+      tc_list tc_pa p.pat_attr
+    in
+    acc1++acc2++acc3, {pat_desc=desc; pat_typ=typ; pat_attr}
 
-let trans_var tr x = Id.map_typ tr.tr_typ x
+  let gen_info tc env = function
+    | InfoInt n -> tc.empty, InfoInt n
+    | InfoString s -> tc.empty, InfoString s
+    | InfoId x ->
+        let acc,x' = tc.var env x in
+        acc, InfoId x'
+    | InfoTerm t ->
+        let acc,t' = tc.term env t in
+        acc, InfoTerm t'
+    | InfoIdTerm(x,t) ->
+        let acc1,x' = tc.var env x in
+        let acc2,t' = tc.term env t in
+        tc.app acc1 acc2, InfoIdTerm(x',t')
 
-let trans_pat tr p =
-  let typ = tr.tr_typ p.pat_typ in
-  let desc =
-    match p.pat_desc with
-    | PAny -> PAny
-    | PNondet -> PNondet
-    | PVar x -> PVar (tr.tr_var x)
-    | PAlias(p,x) -> PAlias(tr.tr_pat p, tr.tr_var x)
-    | PConst t -> PConst (tr.tr_term t)
-    | PConstr(s,ps) -> PConstr(s, List.map tr.tr_pat ps)
-    | PNil -> PNil
-    | PCons(p1,p2) -> PCons(tr.tr_pat p1, tr.tr_pat p2)
-    | PTuple ps -> PTuple (List.map tr.tr_pat ps)
-    | PRecord pats -> PRecord(List.map (Pair.map_snd tr.tr_pat) pats)
-    | POr(p1,p2) -> POr(tr.tr_pat p1, tr.tr_pat p2)
-    | PNone -> PNone
-    | PSome p -> PSome (tr.tr_pat p)
-    | PWhen(p,cond) -> PWhen(tr.tr_pat p, tr.tr_term cond)
-  in
-  {pat_desc=desc; pat_typ=typ}
+  let gen_const tc env c =
+    match c with
+    | Rand(typ,b) ->
+        let acc,typ' = tc.typ env typ in
+        acc, Rand(typ',b)
+    | _ -> tc.empty, c
 
-let trans_info tr = function
-  | InfoInt n -> InfoInt n
-  | InfoString s -> InfoString s
-  | InfoId x -> InfoId (tr.tr_var x)
-  | InfoTerm t -> InfoTerm (tr.tr_term t)
-  | InfoIdTerm(x, t) ->  InfoIdTerm(tr.tr_var x, tr.tr_term t)
+  let gen_decl tc env decl =
+    match decl with
+    | Decl_let defs ->
+        let aux (x,t) =
+          let acc1,x' = tc.var env x in
+          let acc2,t' = tc.term env t in
+          tc.app acc1 acc2, (x',t')
+        in
+        let acc,defs' = gen_list tc aux defs in
+        acc, Decl_let defs'
+    | Decl_type decls ->
+        let aux (name,(params,ty)) =
+          let acc, ty' = tc.typ env ty in
+          acc, (name, (params,ty'))
+        in
+        let acc,decls' = gen_list tc aux decls in
+        acc, Decl_type decls'
+    | Type_ext(Ext_type(s, (params, {ext_row_path;ext_row_args;ext_row_ret}))) ->
+        let acc,ext_row_ret = gen_option tc (tc.typ env) ext_row_ret in
+        let acc,ext_row_args = gen_list ~acc tc (tc.typ env) ext_row_args in
+        let row = {ext_row_path; ext_row_args; ext_row_ret} in
+        acc, Type_ext(Ext_type(s, (params, row)))
+    | Type_ext(Ext_rebind(s1,s2)) -> tc.empty, Type_ext(Ext_rebind(s1,s2))
+    | Include t ->
+        let acc,t' = tc.term env t in
+        acc, Include t'
+    | Decl_multi decls ->
+        let acc,decls' = gen_list tc (tc.decl env) decls in
+        acc, Decl_multi decls'
 
-let trans_const tr c =
-  match c with
-  | Unit -> Unit
-  | True -> True
-  | False -> False
-  | Int n -> Int n
-  | Char c -> Char c
-  | String s -> String s
-  | Float s -> Float s
-  | Int32 n -> Int32 n
-  | Int64 n -> Int64 n
-  | Nativeint n -> Nativeint n
-  | CPS_result -> CPS_result
-  | Rand(typ,b) -> Rand(tr.tr_typ typ,b)
-  | Empty -> Empty
+  let rec gen_lid tc env (lid:lid) : _ * lid =
+    let (++) = tc.app in
+    match lid with
+    | LId x ->
+        let acc,x = tc.var env x in
+        acc, LId x
+    | LDot(p,s) ->
+        let acc,p = gen_lid tc env p in
+        acc, LDot(p,s)
+    | LApp(p1,p2) ->
+        let acc1,p1 = gen_lid tc env p1 in
+        let acc2,p2 = gen_lid tc env p2 in
+        acc1 ++ acc2, LApp(p1,p2)
 
-let trans_decl tr decl =
-  match decl with
-  | Decl_let defs -> Decl_let (List.map (Pair.map tr.tr_var tr.tr_term) defs)
-  | Decl_type decls -> Decl_type (List.map (Pair.map_snd tr.tr_typ) decls)
-  | Open m -> Open (tr.tr_var m)
+  let gen_desc tc env desc =
+    let tce = tc.empty in
+    let (++) = tc.app in
+    let tct = tc.term env in
+    let tcp = tc.pat env in
+    let tcc = tc.const env in
+    let tcv = tc.var env in
+    let tcd = tc.decl env in
+    let tc_list ?acc f ts = gen_list tc ?acc f ts in
+    let wrap constr f x = gen_wrap f constr x in
+    let wrap_bin constr f1 x1 f2 x2 =
+      let acc1,x1' = f1 x1 in
+      let acc2,x2' = f2 x2 in
+      acc1 ++ acc2, constr x1' x2'
+    in
+    match desc with
+    | End_of_definitions -> tce, End_of_definitions
+    | Const c -> wrap _Const tcc c
+    | Var y ->
+        let acc,y = gen_lid tc env y in
+        acc, Var y
+    | Fun(y, t) -> wrap_bin _Fun tcv y tct t
+    | App(t1, ts) -> wrap_bin _App tct t1 (tc_list tct) ts
+    | If(t1, t2, t3) ->
+        let acc1,t1' = tct t1 in
+        let acc2,t2' = tct t2 in
+        let acc3,t3' = tct t3 in
+        acc1 ++ acc2 ++ acc3, If(t1',t2',t3')
+    | Local(decl, t2) -> wrap_bin _Local tcd decl tct t2
+    | BinOp(op, t1, t2) -> wrap_bin (_BinOp op) tct t1 tct t2
+    | Not t1 -> wrap _Not tct t1
+    | Event(s,b) -> tce, Event(s,b)
+    | Record fields -> wrap _Record (tc_list (fun (s,t1) -> wrap (Pair.pair s) tct t1)) fields
+    | Field(t1,s) -> wrap (_Field -$- s) tct t1
+    | SetField(t1,s,t2) -> wrap_bin (fun t1' t2' -> _SetField t1' s t2') tct t1 tct t2
+    | Nil -> tce, Nil
+    | Cons(t1,t2) -> wrap_bin _Cons tct t1 tct t2
+    | Constr(b,s,ts) -> wrap (_Constr b s) (tc_list tct) ts
+    | Match(t1,pats) ->
+        let aux (pat,t1) = wrap_bin Pair.pair tcp pat tct t1 in
+        wrap_bin _Match tct t1 (tc_list aux) pats
+    | Raise t -> wrap _Raise tct t
+    | TryWith(t1,t2) -> wrap_bin _TryWith tct t1 tct t2
+    | Tuple ts -> wrap _Tuple (tc_list tct) ts
+    | Proj(i,t) -> wrap (_Proj i) tct t
+    | Bottom -> tce, Bottom
+    | Label(info, t) -> wrap_bin _Label (tc.info env) info tct t
+    | Ref t -> wrap _Ref tct t
+    | Deref t -> wrap _Deref tct t
+    | SetRef(t1,t2) -> wrap_bin _SetRef tct t1 tct t2
+    | TNone -> tce, TNone
+    | TSome t -> wrap _TSome tct t
+    | Lazy t -> wrap _Lazy tct t
+    | Module decls -> wrap _Module (tc_list tcd) decls
+    | Pack t -> wrap _Pack tct t
+    | Unpack t -> wrap _Unpack tct t
+    | MemSet(t1, t2) -> wrap_bin _MemSet tct t1 tct t2
+    | AddSet(t1, t2) -> wrap_bin _AddSet tct t1 tct t2
+    | Subset(t1, t2) -> wrap_bin _Subset tct t1 tct t2
+    | Forall(y, t) -> wrap_bin _Forall tcv y tct t
+    | Exists(y, t) -> wrap_bin _Exists tcv y tct t
 
-let trans_desc tr = function
-  | End_of_definitions -> End_of_definitions
-  | Const c -> Const(tr.tr_const c)
-  | Var y -> Var (tr.tr_var y)
-  | Fun(y, t) -> Fun(tr.tr_var y, tr.tr_term t)
-  | App(t1, ts) -> App(tr.tr_term t1, List.map tr.tr_term ts)
-  | If(t1, t2, t3) -> If(tr.tr_term t1, tr.tr_term t2, tr.tr_term t3)
-  | Local(decl, t2) -> Local(tr.tr_decl decl, tr.tr_term t2)
-  | BinOp(op, t1, t2) -> BinOp(op, tr.tr_term t1, tr.tr_term t2)
-  | Not t1 -> Not (tr.tr_term t1)
-  | Event(s,b) -> Event(s,b)
-  | Record fields ->  Record (List.map (Pair.map_snd tr.tr_term) fields)
-  | Field(t1,s) -> Field(tr.tr_term t1, s)
-  | SetField(t1,s,t2) -> SetField(tr.tr_term t1,s,tr.tr_term t2)
-  | Nil -> Nil
-  | Cons(t1,t2) -> Cons(tr.tr_term t1, tr.tr_term t2)
-  | Constr(s,ts) -> Constr(s, List.map tr.tr_term ts)
-  | Match(t1,pats) -> Match(tr.tr_term t1, List.map (Pair.map tr.tr_pat tr.tr_term) pats)
-  | Raise t -> Raise (tr.tr_term t)
-  | TryWith(t1,t2) -> TryWith(tr.tr_term t1, tr.tr_term t2)
-  | Tuple ts -> Tuple (List.map tr.tr_term ts)
-  | Proj(i,t) -> Proj(i, tr.tr_term t)
-  | Bottom -> Bottom
-  | Label(info, t) -> Label(tr.tr_info info, tr.tr_term t)
-  | Ref t -> Ref(tr.tr_term t)
-  | Deref t -> Deref(tr.tr_term t)
-  | SetRef(t1, t2) -> SetRef(tr.tr_term t1, tr.tr_term t2)
-  | TNone -> TNone
-  | TSome t -> TSome (tr.tr_term t)
-  | Module decls -> Module (List.map tr.tr_decl decls)
-  | MemSet(t1, t2) -> MemSet(tr.tr_term t1, tr.tr_term t2)
-  | AddSet(t1, t2) -> AddSet(tr.tr_term t1, tr.tr_term t2)
-  | Subset(t1, t2) -> Subset(tr.tr_term t1, tr.tr_term t2)
-
-let trans_term tr t =
-  {desc = tr.tr_desc t.desc; typ = tr.tr_typ t.typ; attr=tr.tr_attr t.attr}
-
-
-
-let make_trans () =
-  let tr =
-    {tr_term = Fun.id;
-     tr_term_rec = Fun.id;
-     tr_desc = Fun.id;
-     tr_desc_rec = Fun.id;
-     tr_typ = Fun.id;
-     tr_typ_rec = Fun.id;
-     tr_var = Fun.id;
-     tr_var_rec = Fun.id;
-     tr_pat = Fun.id;
-     tr_pat_rec = Fun.id;
-     tr_info = Fun.id;
-     tr_info_rec = Fun.id;
-     tr_const = Fun.id;
-     tr_const_rec = Fun.id;
-     tr_decl = Fun.id;
-     tr_decl_rec = Fun.id;
-     tr_attr = Fun.id}
-  in
-  tr.tr_term <- trans_term tr;
-  tr.tr_term_rec <- trans_term tr;
-  tr.tr_desc <- trans_desc tr;
-  tr.tr_desc_rec <- trans_desc tr;
-  tr.tr_typ <- trans_typ tr;
-  tr.tr_typ_rec <- trans_typ tr;
-  tr.tr_var <- trans_var tr;
-  tr.tr_var_rec <- trans_var tr;
-  tr.tr_pat <- trans_pat tr;
-  tr.tr_pat_rec <- trans_pat tr;
-  tr.tr_info <- trans_info tr;
-  tr.tr_info_rec <- trans_info tr;
-  tr.tr_const <- trans_const tr;
-  tr.tr_const_rec <- trans_const tr;
-  tr.tr_decl <- trans_decl tr;
-  tr.tr_decl_rec <- trans_decl tr;
-  tr
-
-
-
+  let gen_term tc env t =
+    let (++) = tc.app in
+    let acc1,desc = tc.desc env (desc t) in
+    let acc2,typ = tc.typ env t.typ in
+    let acc3,attr = tc.attr env t.attr in
+    acc1++acc2++acc3, {desc; typ; attr}
 
 
+  let make empty app =
+    let f _ x = empty, x in
+    let tc =
+      {term      = f;
+       term_rec  = f;
+       desc      = f;
+       desc_rec  = f;
+       typ       = f;
+       typ_rec   = f;
+       var       = f;
+       lid       = f;
+       pat       = f;
+       pat_rec   = f;
+       info      = f;
+       info_rec  = f;
+       const     = f;
+       const_rec = f;
+       decl      = f;
+       decl_rec  = f;
+       attr      = f;
+       app       = app;
+       empty     = empty}
+
+    in
+    tc.term      <- gen_term tc;
+    tc.term_rec  <- gen_term tc;
+    tc.desc      <- gen_desc tc;
+    tc.desc_rec  <- gen_desc tc;
+    tc.typ       <- gen_typ tc;
+    tc.typ_rec   <- gen_typ tc;
+    tc.var       <- gen_var tc;
+    tc.lid       <- gen_lid tc;
+    tc.pat       <- gen_pat tc;
+    tc.pat_rec   <- gen_pat tc;
+    tc.info      <- gen_info tc;
+    tc.info_rec  <- gen_info tc;
+    tc.decl      <- gen_decl tc;
+    tc.decl_rec  <- gen_decl tc;
+    tc.const     <- gen_const tc;
+    tc.const_rec <- gen_const tc;
+    tc
+end
 
 
-type 'a trans2 =
-  {mutable tr2_term: 'a -> term -> term;
-   mutable tr2_term_rec: 'a -> term -> term;
-   mutable tr2_desc: 'a -> desc -> desc;
-   mutable tr2_desc_rec: 'a -> desc -> desc;
-   mutable tr2_typ: 'a -> typ -> typ;
-   mutable tr2_typ_rec: 'a -> typ -> typ;
-   mutable tr2_var: 'a -> id -> id;
-   mutable tr2_var_rec: 'a -> id -> id;
-   mutable tr2_pat: 'a -> pattern -> pattern;
-   mutable tr2_pat_rec: 'a -> pattern -> pattern;
-   mutable tr2_info: 'a -> info -> info;
-   mutable tr2_info_rec: 'a -> info -> info;
-   mutable tr2_decl: 'a -> declaration -> declaration;
-   mutable tr2_decl_rec: 'a -> declaration -> declaration;
-   mutable tr2_const: 'a -> const -> const;
-   mutable tr2_const_rec: 'a -> const -> const;
-   mutable tr2_attr: 'a -> attr list -> attr list}
 
-let trans2_gen_typ tr env = function
-  | TBase b -> TBase b
-  | TVar({contents=None} as x,id) -> TVar(x,id)
-  | TVar({contents=Some typ},_) -> tr.tr2_typ env typ
-  | TFun(x,typ) -> TFun(Id.map_typ (tr.tr2_typ env) x, tr.tr2_typ env typ)
-  | TFuns(xs,typ) -> TFuns(List.map (Id.map_typ @@ tr.tr2_typ env) xs, tr.tr2_typ env typ)
-  | TApp(c, typs) -> TApp(c, List.map (tr.tr2_typ env) typs)
-  | TTuple xs -> TTuple (List.map (tr.tr2_var env) xs)
-  | TData s -> TData s
-  | TAttr(attr, typ) ->
-      let aux a =
+
+
+module Fold_tr = struct
+  type 'a t =
+    {mutable term:      'a -> term        -> 'a * term;
+     mutable term_rec:  'a -> term        -> 'a * term;
+     mutable desc:      'a -> desc        -> 'a * desc;
+     mutable desc_rec:  'a -> desc        -> 'a * desc;
+     mutable typ:       'a -> typ         -> 'a * typ;
+     mutable typ_rec:   'a -> typ         -> 'a * typ;
+     mutable var:       'a -> id          -> 'a * id;
+     mutable lid:       'a -> lid         -> 'a * lid;
+     mutable pat:       'a -> pattern     -> 'a * pattern;
+     mutable pat_rec:   'a -> pattern     -> 'a * pattern;
+     mutable info:      'a -> info        -> 'a * info;
+     mutable info_rec:  'a -> info        -> 'a * info;
+     mutable decl:      'a -> declaration -> 'a * declaration;
+     mutable decl_rec:  'a -> declaration -> 'a * declaration;
+     mutable const:     'a -> const       -> 'a * const;
+     mutable const_rec: 'a -> const       -> 'a * const;
+     mutable attr:      'a -> attr list   -> 'a * attr list}
+
+  let gen_list_right ~f:tr_col ~acc xs =
+    let aux x (acc,xs) =
+      let acc,x' = tr_col acc x in
+      acc, x'::xs
+    in
+    List.fold_right aux xs (acc,[])
+  let gen_list = gen_list_right
+
+  let gen_list_left ~f:tr_col ~acc xs =
+    let aux (acc,xs_rev) x =
+      let acc,x' = tr_col acc x in
+      acc, x'::xs_rev
+    in
+    let acc,xs_rev = List.fold_left aux (acc,[]) xs in
+    acc, List.rev xs_rev
+
+  let gen_option ~f:tr_col ~acc x =
+    match x with
+    | None -> acc, None
+    | Some y ->
+        let acc,y' = tr_col acc y in
+        acc, Some y'
+
+  let gen_ext fld acc (s, (params, {ext_row_path; ext_row_args; ext_row_ret})) =
+    let acc,ext_row_args = gen_list ~f:fld.typ ~acc ext_row_args in
+    let acc,ext_row_ret = gen_option ~f:fld.typ ~acc ext_row_ret in
+    acc, (s, (params, {ext_row_path; ext_row_args; ext_row_ret}))
+
+  let gen_typ fld acc ty =
+    match ty with
+    | TBase _ -> acc, ty
+    | TVar(_,{contents=Some typ},_) -> fld.typ acc typ
+    | TVar(b,x,id) -> acc, TVar(b,x,id)
+    | TFun(x,typ) ->
+        let acc,x' = fld.var acc x in
+        let acc,typ' = fld.typ acc typ in
+        acc, TFun(x', typ')
+    | TConstr(c, typs) ->
+        let acc,typs' = gen_list ~f:fld.typ ~acc typs in
+        acc, TConstr(c, typs')
+    | TTuple xs ->
+        let acc,xs' = gen_list ~f:fld.var ~acc xs in
+        acc, TTuple xs'
+    | TAttr(attr, typ) ->
+        let acc,attr' =
+          gen_list ~acc attr
+            ~f:(fun acc a ->
+              match a with
+              | TAPred(x,ps) ->
+                  let acc,x' = fld.var acc x in
+                  let acc,ps' = gen_list ~f:fld.term ~acc ps in
+                  acc, TAPred(x',ps')
+              | TARefPred(x,p) ->
+                  let acc,x' = fld.var acc x in
+                  let acc,p' = fld.term acc p in
+                  acc, TARefPred(x',p')
+              | TAPureFun -> acc, TAPureFun
+              | TAEffect e -> acc, TAEffect e
+              | TAPredShare x -> acc, TAPredShare x
+              | TAId(s,x) -> acc, TAId(s,x)
+              | TARaise ty ->
+                  let acc,ty' = fld.typ acc ty in
+                  acc, TARaise ty')
+        in
+        let acc,typ' = fld.typ acc typ in
+        acc, TAttr(attr', typ')
+    | TVariant(poly,rows) ->
+        let acc,rows' =
+          let aux {row_constr; row_args; row_ret} acc =
+            let acc,row_args = gen_list ~f:fld.typ ~acc row_args in
+            let acc,row_ret = gen_option ~f:fld.typ ~acc row_ret in
+            acc, {row_constr; row_args; row_ret}
+          in
+          List.fold_right_map aux rows acc
+        in
+        acc, TVariant(poly,rows')
+    | TRecord fields ->
+        let acc,fields' =
+          gen_list ~acc fields
+            ~f:(fun acc (s,(f,typ)) ->
+              let acc,typ' = fld.typ acc typ in
+              acc, (s,(f,typ')))
+        in
+        acc, TRecord fields'
+    | TModSig {sig_types; sig_values; sig_ext} ->
+        let acc,sig_types =
+          let aux acc (s, (params, typ)) =
+            let acc,typ' = fld.typ acc typ in
+            acc, (s, (params, typ'))
+          in
+          gen_list ~f:(fun acc -> gen_list ~f:aux ~acc) ~acc sig_types
+        in
+        let acc,sig_ext = gen_list ~f:(gen_ext fld) ~acc sig_ext in
+        let acc,sig_values = gen_list ~f:fld.var ~acc sig_values in
+        acc, TModSig {sig_types; sig_values; sig_ext}
+    | TModLid _ -> acc, ty
+    | TPackage typ ->
+        let acc,typ' = fld.typ acc typ in
+        acc, TPackage typ'
+    | TPoly(vars, typ) ->
+        let acc,typ' = fld.typ acc typ in
+        acc, TPoly(vars, typ')
+    | TFuns _ -> unsupported "fld"
+    | TConstraint(ty, cs) ->
+        let acc,ty' = fld.typ acc ty in
+        let acc,cs' =
+          gen_list ~acc cs
+            ~f:(fun acc (p,ty) ->
+              let acc,p' = fld.typ acc p in
+              let acc,ty' = fld.typ acc ty in
+              acc, (p', ty'))
+        in
+        acc, TConstraint(ty', cs')
+    | TOpen -> acc, ty
+
+  let gen_var fld acc x =
+    let acc,typ' = fld.typ acc (Id.typ x) in
+    acc, Id.set_typ x typ'
+
+  let gen_pat fld acc p =
+    let acc,typ = fld.typ acc p.pat_typ in
+    let acc,desc =
+      match p.pat_desc with
+      | PAny -> acc, PAny
+      | PNondet -> acc, PNondet
+      | PVar x ->
+          let acc,x' = fld.var acc x in
+          acc, PVar x'
+      | PAlias(p,x) ->
+          let acc,p' = fld.pat acc p in
+          let acc,x' = fld.var acc x in
+          acc, PAlias(p',x')
+      | PConst t ->
+          let acc,t' = fld.term acc t in
+          acc, PConst t'
+      | PConstr(b,s,ps) ->
+          let acc,ps' = gen_list ~f:fld.pat ~acc ps in
+          acc, PConstr(b,s,ps')
+      | PNil -> acc, PNil
+      | PCons(p1,p2) ->
+          let acc,p1' = fld.pat acc p1 in
+          let acc,p2' = fld.pat acc p2 in
+          acc, PCons(p1', p2')
+      | PTuple ps ->
+          let acc,ps' = gen_list ~f:fld.pat ~acc ps in
+          acc, PTuple ps'
+      | PRecord pats ->
+          let aux acc (s,p) =
+            let acc,p' = fld.pat acc p in
+            acc, (s,p')
+          in
+          let acc,pats' = gen_list ~f:aux ~acc pats in
+          acc, PRecord pats'
+      | POr(p1,p2) ->
+          let acc,p1' = fld.pat acc p1 in
+          let acc,p2' = fld.pat acc p2 in
+          acc, POr(p1', p2')
+      | PNone -> acc, PNone
+      | PSome p ->
+          let acc,p' = fld.pat acc p in
+          acc, PSome p'
+      | PWhen(p,cond) ->
+          let acc,p' = fld.pat acc p in
+          let acc,cond' = fld.term acc cond in
+          acc, PWhen(p', cond')
+      | PLazy p ->
+          let acc,p' = fld.pat acc p in
+          acc, PLazy p'
+      | PEval(x,t,p) ->
+          let acc,x' = fld.var acc x in
+          let acc,t' = fld.term acc t in
+          let acc,p' = fld.pat acc p in
+          acc, PEval(x',t',p')
+    in
+    let acc,pat_attr =
+      let fld_pa acc a =
         match a with
-        | TAPred(x,ps) -> TAPred(tr.tr2_var env x, List.map (tr.tr2_term env) ps)
-        | TARefPred(x,p) -> TARefPred(tr.tr2_var env x, tr.tr2_term env p)
-        | TAPureFun -> TAPureFun
-        | TAEffect e -> TAEffect e
-        | TAPredShare x -> TAPredShare x
-        | TAId(s,n) -> TAId(s,n)
-        | TARaise ty -> TARaise (tr.tr2_typ env ty)
+        | PABV xs ->
+            let acc,xs = gen_list ~f:fld.var ~acc xs in
+            acc, PABV xs
+        | PAFV xs ->
+            let acc,xs = gen_list ~f:fld.var ~acc xs in
+            acc, PAFV xs
       in
-      TAttr(List.map aux attr, tr.tr2_typ env typ)
-  | TVariant(poly,labels) -> TVariant(poly, List.map (Pair.map_snd @@ List.map @@ tr.tr2_typ env) labels)
-  | TRecord fields -> TRecord (List.map (Pair.map_snd @@ Pair.map_snd @@ tr.tr2_typ env) fields)
-  | TModule {sig_types; sig_values} ->
-      let sig_types = List.map (Pair.map_snd @@ tr.tr2_typ env) sig_types in
-      let sig_values = List.map (tr.tr2_var env) sig_values in
-      TModule {sig_types; sig_values}
+      gen_list ~f:fld_pa ~acc p.pat_attr
+    in
+    acc, {pat_desc=desc; pat_typ=typ; pat_attr}
 
+  let gen_info fld acc = function
+    | InfoInt n -> acc, InfoInt n
+    | InfoString s -> acc, InfoString s
+    | InfoId x ->
+        let acc,x' = fld.var acc x in
+        acc, InfoId x'
+    | InfoTerm t ->
+        let acc,t' = fld.term acc t in
+        acc, InfoTerm t'
+    | InfoIdTerm(x,t) ->
+        let acc,x' = fld.var acc x in
+        let acc,t' = fld.term acc t in
+        acc, InfoIdTerm(x',t')
 
-let trans2_gen_var tr env x = Id.map_typ (tr.tr2_typ env) x
+  let gen_const fld acc c =
+    match c with
+    | Rand(typ,b) ->
+        let acc,typ' = fld.typ acc typ in
+        acc, Rand(typ',b)
+    | Dummy typ ->
+        let acc,typ' = fld.typ acc typ in
+        acc, Dummy typ'
+    | _ -> acc, c
 
-let trans2_gen_pat tr env p =
-  let typ = tr.tr2_typ env p.pat_typ in
-  let desc =
-    match p.pat_desc with
-    | PAny -> PAny
-    | PNondet -> PNondet
-    | PVar x -> PVar (tr.tr2_var env x)
-    | PAlias(p,x) -> PAlias(tr.tr2_pat env p, tr.tr2_var env x)
-    | PConst t -> PConst (tr.tr2_term env t)
-    | PConstr(s,ps) -> PConstr(s, List.map (tr.tr2_pat env) ps)
-    | PNil -> PNil
-    | PCons(p1,p2) -> PCons(tr.tr2_pat env p1, tr.tr2_pat env p2)
-    | PTuple ps -> PTuple (List.map (tr.tr2_pat env) ps)
-    | PRecord pats -> PRecord(List.map (Pair.map_snd @@ tr.tr2_pat env) pats)
-    | POr(p1,p2) -> POr(tr.tr2_pat env p1, tr.tr2_pat env p2)
-    | PNone -> PNone
-    | PSome p -> PSome (tr.tr2_pat env p)
-    | PWhen(p,cond) -> PWhen(tr.tr2_pat env p, tr.tr2_term env cond)
-  in
-  {pat_desc=desc; pat_typ=typ}
-
-let trans2_gen_info tr env = function
-  | InfoInt n -> InfoInt n
-  | InfoString s -> InfoString s
-  | InfoId x -> InfoId (tr.tr2_var env x)
-  | InfoTerm t -> InfoTerm (tr.tr2_term env t)
-  | InfoIdTerm(x, t) -> InfoIdTerm(tr.tr2_var env x, tr.tr2_term env t)
-
-let trans2_gen_const tr env c =
-  match c with
-  | Unit -> Unit
-  | True -> True
-  | False -> False
-  | Int n -> Int n
-  | Char c -> Char c
-  | String s -> String s
-  | Float s -> Float s
-  | Int32 n -> Int32 n
-  | Int64 n -> Int64 n
-  | Nativeint n -> Nativeint n
-  | CPS_result -> CPS_result
-  | Rand(typ,b) -> Rand(tr.tr2_typ env typ, b)
-  | Empty -> Empty
-
-let trans2_gen_decl tr env decl =
-  match decl with
-  | Decl_let defs -> Decl_let (List.map (Pair.map (tr.tr2_var env) (tr.tr2_term env)) defs)
-  | Decl_type decls -> Decl_type (List.map (Pair.map_snd @@ tr.tr2_typ env) decls)
-  | Open m -> Open (tr.tr2_var env m)
-
-let trans2_gen_desc tr env desc =
-  match desc with
-  | End_of_definitions -> End_of_definitions
-  | Const c -> Const(tr.tr2_const env c)
-  | Var y -> Var (tr.tr2_var env y)
-  | Fun(y, t) -> Fun(tr.tr2_var env y, tr.tr2_term env t)
-  | App(t1, ts) -> App(tr.tr2_term env t1, List.map (tr.tr2_term env) ts)
-  | If(t1, t2, t3) -> If(tr.tr2_term env t1, tr.tr2_term env t2, tr.tr2_term env t3)
-  | Local(decl, t2) -> Local(tr.tr2_decl env decl, tr.tr2_term env t2)
-  | BinOp(op, t1, t2) -> BinOp(op, tr.tr2_term env t1, tr.tr2_term env t2)
-  | Not t1 -> Not (tr.tr2_term env t1)
-  | Event(s,b) -> Event(s,b)
-  | Record fields -> Record (List.map (Pair.map_snd @@ tr.tr2_term env) fields)
-  | Field(t1,s) -> Field(tr.tr2_term env t1,s)
-  | SetField(t1,s,t2) -> SetField(tr.tr2_term env t1,s,tr.tr2_term env t2)
-  | Nil -> Nil
-  | Cons(t1,t2) -> Cons(tr.tr2_term env t1, tr.tr2_term env t2)
-  | Constr(s,ts) -> Constr(s, List.map (tr.tr2_term env) ts)
-  | Match(t1,pats) ->
-      Match(tr.tr2_term env t1, List.map (Pair.map (tr.tr2_pat env) (tr.tr2_term env)) pats)
-  | Raise t -> Raise (tr.tr2_term env t)
-  | TryWith(t1,t2) -> TryWith(tr.tr2_term env t1, tr.tr2_term env t2)
-  | Tuple ts -> Tuple (List.map (tr.tr2_term env) ts)
-  | Proj(i,t) -> Proj(i, tr.tr2_term env t)
-  | Bottom -> Bottom
-  | Label(info, t) -> Label(tr.tr2_info env info, tr.tr2_term env t)
-  | Ref t -> Ref (tr.tr2_term env t)
-  | Deref t -> Deref (tr.tr2_term env t)
-  | SetRef(t1,t2) -> SetRef(tr.tr2_term env t1, tr.tr2_term env t2)
-  | TNone -> TNone
-  | TSome t -> TSome (tr.tr2_term env t)
-  | Module decls -> Module (List.map (tr.tr2_decl env) decls)
-  | MemSet(t1, t2) -> MemSet(tr.tr2_term env t1, tr.tr2_term env t2)
-  | AddSet(t1, t2) -> AddSet(tr.tr2_term env t1, tr.tr2_term env t2)
-  | Subset(t1, t2) -> Subset(tr.tr2_term env t1, tr.tr2_term env t2)
-
-let trans2_gen_term tr env t = {desc = tr.tr2_desc env t.desc; typ = tr.tr2_typ env t.typ; attr = tr.tr2_attr env t.attr}
-
-
-let make_trans2 () =
-  let id' _ = Fun.id in
-  let tr =
-    {tr2_term = id';
-     tr2_term_rec = id';
-     tr2_desc = id';
-     tr2_desc_rec = id';
-     tr2_typ = id';
-     tr2_typ_rec = id';
-     tr2_var = id';
-     tr2_var_rec = id';
-     tr2_pat = id';
-     tr2_pat_rec = id';
-     tr2_info = id';
-     tr2_info_rec = id';
-     tr2_decl = id';
-     tr2_decl_rec = id';
-     tr2_const = id';
-     tr2_const_rec = id';
-     tr2_attr = id'}
-  in
-  tr.tr2_term <- trans2_gen_term tr;
-  tr.tr2_term_rec <- trans2_gen_term tr;
-  tr.tr2_desc <- trans2_gen_desc tr;
-  tr.tr2_desc_rec <- trans2_gen_desc tr;
-  tr.tr2_typ <- trans2_gen_typ tr;
-  tr.tr2_typ_rec <- trans2_gen_typ tr;
-  tr.tr2_var <- trans2_gen_var tr;
-  tr.tr2_var_rec <- trans2_gen_var tr;
-  tr.tr2_pat <- trans2_gen_pat tr;
-  tr.tr2_pat_rec <- trans2_gen_pat tr;
-  tr.tr2_info <- trans2_gen_info tr;
-  tr.tr2_info_rec <- trans2_gen_info tr;
-  tr.tr2_decl <- trans2_gen_decl tr;
-  tr.tr2_decl_rec <- trans2_gen_decl tr;
-  tr.tr2_const <- trans2_gen_const tr;
-  tr.tr2_const_rec <- trans2_gen_const tr;
-  tr
-
-
-
-
-
-
-type 'a col =
-  {mutable col_term: term -> 'a;
-   mutable col_term_rec: term -> 'a;
-   mutable col_desc: desc -> 'a;
-   mutable col_desc_rec: desc -> 'a;
-   mutable col_typ: typ -> 'a;
-   mutable col_typ_rec: typ -> 'a;
-   mutable col_var: id -> 'a;
-   mutable col_var_rec: id -> 'a;
-   mutable col_pat: pattern -> 'a;
-   mutable col_pat_rec: pattern -> 'a;
-   mutable col_info: info -> 'a;
-   mutable col_info_rec: info -> 'a;
-   mutable col_decl: declaration -> 'a;
-   mutable col_decl_rec: declaration -> 'a;
-   mutable col_const: const -> 'a;
-   mutable col_const_rec: const -> 'a;
-   mutable col_attr: attr list -> 'a;
-   mutable col_app: 'a -> 'a -> 'a;
-   mutable col_empty: 'a}
-
-let col_list col ?(init=col.col_empty) f xs =
-  List.fold_left (fun acc typ -> col.col_app acc @@ f typ) init xs
-
-let col_typ col typ =
-  let (++) = col.col_app in
-  match typ with
-  | TBase _ -> col.col_empty
-  | TVar({contents=None},_) -> col.col_empty
-  | TVar({contents=Some typ},_) -> col.col_typ typ
-  | TFun(x,typ) -> col.col_typ (Id.typ x) ++ col.col_typ typ
-  | TFuns(xs,typ) -> col_list col ~init:(col.col_typ typ) col.col_var xs
-  | TApp(_, typs) -> col_list col col.col_typ typs
-  | TTuple xs -> col_list col col.col_var xs
-  | TData _ -> col.col_empty
-  | TAttr(attr, typ) ->
-      let aux acc a =
-        match a with
-        | TAPred(x,ps) ->
-            let acc' = col.col_var x ++ acc in
-            List.fold_left (fun acc p -> acc ++ col.col_term p) acc' ps
-        | TARefPred(x,p) -> col.col_var x ++ col.col_term p ++ acc
-        | TAPureFun -> acc
-        | TAEffect _ -> acc
-        | TAPredShare _ -> acc
-        | TAId _ -> acc
-        | TARaise ty -> col.col_typ ty ++ acc
-      in
-      List.fold_left aux (col.col_typ typ) attr
-  | TVariant(_,labels) -> List.fold_left (fun init (_,typs) -> col_list col col.col_typ ~init typs) col.col_empty labels
-  | TRecord fields -> col_list col (snd |- snd |- col.col_typ) fields
-  | TModule {sig_types; sig_values} ->
-      col_list col (snd |- col.col_typ) sig_types ++ col_list col col.col_var sig_values
-
-let col_var col x = col.col_typ (Id.typ x)
-
-let col_pat col p =
-  let (++) = col.col_app in
-  let r1 = col.col_typ p.pat_typ in
-  let r2 =
-    match p.pat_desc with
-    | PAny -> col.col_empty
-    | PNondet -> col.col_empty
-    | PVar x -> col.col_var x
-    | PAlias(p,x) -> col.col_pat p ++ col.col_var x
-    | PConst t -> col.col_term t
-    | PConstr(_,ps) -> col_list col col.col_pat ps
-    | PNil -> col.col_empty
-    | PCons(p1,p2) -> col.col_pat p1 ++ col.col_pat p2
-    | PTuple ps -> col_list col col.col_pat ps
-    | PRecord pats -> col_list col (snd |- col.col_pat) pats
-    | POr(p1,p2) -> col.col_pat p1 ++ col.col_pat p2
-    | PNone -> col.col_empty
-    | PSome p -> col.col_pat p
-    | PWhen(p,cond) -> col.col_pat p ++ col.col_term cond
-  in
-  col.col_app r1 r2
-
-let col_info col info =
-  match info with
-  | InfoInt _ -> col.col_empty
-  | InfoString _ -> col.col_empty
-  | InfoId x -> col.col_var x
-  | InfoTerm t -> col.col_term t
-  | InfoIdTerm(x, t) -> col.col_app (col.col_var x) (col.col_term t)
-
-let col_const col c =
-  match c with
-  | Rand(typ,_) -> col.col_typ typ
-  | _ -> col.col_empty
-
-let col_decl col decl =
-  match decl with
-  | Decl_let defs ->
-      let aux acc (x,t) =
-        col.col_app acc @@
-        col.col_app (col.col_var x) (col.col_term t)
-      in
-      List.fold_left aux col.col_empty defs
-  | Decl_type decls -> col_list col (snd |- col.col_typ) decls
-  | Open m -> col.col_var m
-
-let col_desc col desc =
-  let (++) = col.col_app in
-  match desc with
-  | End_of_definitions -> col.col_empty
-  | Const c -> col.col_const c
-  | Var y -> col.col_var y
-  | Fun(y, t) -> col.col_var y ++ col.col_term t
-  | App(t1, ts) -> col_list col col.col_term ~init:(col.col_term t1) ts
-  | If(t1, t2, t3) -> col.col_term t1 ++ col.col_term t2 ++ col.col_term t3
-  | Local(decl, t2) -> col.col_term t2 ++ col.col_decl decl
-  | BinOp(_, t1, t2) -> col.col_term t1 ++ col.col_term t2
-  | Not t1 -> col.col_term t1
-  | Event _ -> col.col_empty
-  | Record fields -> col_list col (snd |- col.col_term) fields
-  | Field(t1,_) -> col.col_term t1
-  | SetField(t1,_,t2) -> col.col_term t1 ++ col.col_term t2
-  | Nil -> col.col_empty
-  | Cons(t1,t2) -> col.col_term t1 ++ col.col_term t2
-  | Constr(_,ts) -> col_list col col.col_term ts
-  | Match(t1,pats) ->
-      let aux acc (pat,t1) = acc ++ col.col_pat pat ++ col.col_term t1 in
-      List.fold_left aux (col.col_term t1) pats
-  | Raise t -> col.col_term t
-  | TryWith(t1,t2) -> col.col_term t1 ++ col.col_term t2
-  | Tuple ts -> col_list col col.col_term ts
-  | Proj(_,t) -> col.col_term t
-  | Bottom -> col.col_empty
-  | Label(info, t) -> col.col_info info ++ col.col_term t
-  | Ref t -> col.col_term t
-  | Deref t -> col.col_term t
-  | SetRef(t1,t2) -> col.col_term t1 ++ col.col_term t2
-  | TNone -> col.col_empty
-  | TSome t -> col.col_term t
-  | Module decls -> col_list col col.col_decl decls
-  | MemSet(t1, t2) -> col.col_term t1 ++ col.col_term t2
-  | AddSet(t1, t2) -> col.col_term t1 ++ col.col_term t2
-  | Subset(t1, t2) -> col.col_term t1 ++ col.col_term t2
-
-let col_term col t =
-  let (@@) = col.col_app in
-  col.col_desc t.desc @@ col.col_typ t.typ @@ col.col_attr t.attr
-
-
-let make_col empty app =
-  let f _ = empty in
-  let col =
-    {col_term = f;
-     col_term_rec = f;
-     col_desc = f;
-     col_desc_rec = f;
-     col_typ = f;
-     col_typ_rec = f;
-     col_var = f;
-     col_var_rec = f;
-     col_pat = f;
-     col_pat_rec = f;
-     col_info = f;
-     col_info_rec = f;
-     col_decl = f;
-     col_decl_rec = f;
-     col_const = f;
-     col_const_rec = f;
-     col_attr = f;
-     col_app = app;
-     col_empty = empty}
-  in
-  col.col_term <- col_term col;
-  col.col_term_rec <- col_term col;
-  col.col_desc <- col_desc col;
-  col.col_desc_rec <- col_desc col;
-  col.col_typ <- col_typ col;
-  col.col_typ_rec <- col_typ col;
-  col.col_var <- col_var col;
-  col.col_var_rec <- col_var col;
-  col.col_pat <- col_pat col;
-  col.col_pat_rec <- col_pat col;
-  col.col_info <- col_info col;
-  col.col_info_rec <- col_info col;
-  col.col_decl <- col_decl col;
-  col.col_decl_rec <- col_decl col;
-  col.col_const <- col_const col;
-  col.col_const_rec <- col_const col;
-  col
-
-
-
-
-
-
-type ('a,'b) col2 =
-  {mutable col2_term: 'b -> term -> 'a;
-   mutable col2_term_rec: 'b -> term -> 'a;
-   mutable col2_desc: 'b -> desc -> 'a;
-   mutable col2_desc_rec: 'b -> desc -> 'a;
-   mutable col2_typ: 'b -> typ -> 'a;
-   mutable col2_typ_rec: 'b -> typ -> 'a;
-   mutable col2_var: 'b -> id -> 'a;
-   mutable col2_var_rec: 'b -> id -> 'a;
-   mutable col2_pat: 'b -> pattern -> 'a;
-   mutable col2_pat_rec: 'b -> pattern -> 'a;
-   mutable col2_info: 'b -> info -> 'a;
-   mutable col2_info_rec: 'b -> info -> 'a;
-   mutable col2_decl: 'b -> declaration -> 'a;
-   mutable col2_decl_rec: 'b -> declaration -> 'a;
-   mutable col2_const: 'b -> const -> 'a;
-   mutable col2_const_rec: 'b -> const -> 'a;
-   mutable col2_attr: 'b -> attr list -> 'a;
-   mutable col2_app: 'a -> 'a -> 'a;
-   mutable col2_empty: 'a}
-
-let col2_list col ?(init=col.col2_empty) f xs =
-  List.fold_left (fun acc typ -> col.col2_app acc @@ f typ) init xs
-
-let col2_typ col env typ =
-  let (++) = col.col2_app in
-  match typ with
-  | TBase _ -> col.col2_empty
-  | TVar({contents=None},_) -> col.col2_empty
-  | TVar({contents=Some typ},_) -> col.col2_typ env typ
-  | TFun(x,typ) -> col.col2_var env x ++ col.col2_typ env typ
-  | TFuns(xs,typ) -> col2_list col (col.col2_var env) ~init:(col.col2_typ env typ) xs
-  | TApp(_,typs) -> col2_list col (col.col2_typ env) typs
-  | TTuple xs -> col2_list col (col.col2_var env) xs
-  | TData _ -> col.col2_empty
-  | TAttr(attr, typ) ->
-      let aux acc a =
-        match a with
-        | TAPred(x,ps) ->
-            let init = col.col2_var env x ++ acc in
-            col2_list col (col.col2_term env) ~init ps
-        | TARefPred(x,p) ->
-            col.col2_var env x ++ col.col2_term env p ++ acc
-        | TAPureFun -> acc
-        | TAEffect _ -> acc
-        | TAPredShare _ -> acc
-        | TAId _ -> acc
-        | TARaise ty -> col.col2_typ env ty ++ acc
-      in
-      List.fold_left aux (col.col2_typ env typ) attr
-  | TVariant(_,labels) -> List.fold_left (fun init (_,typs) -> col2_list col (col.col2_typ env) ~init typs) col.col2_empty labels
-  | TRecord fields -> col2_list col (snd |- snd |- col.col2_typ env) fields
-  | TModule {sig_types; sig_values} ->
-      col2_list col (snd |- col.col2_typ env) sig_types ++ col2_list col (col.col2_var env) sig_values
-
-let col2_var col env x = col.col2_typ env (Id.typ x)
-
-let col2_pat col env p =
-  let (++) = col.col2_app in
-  let r1 = col.col2_typ env p.pat_typ in
-  let r2 =
-    match p.pat_desc with
-    | PAny -> col.col2_empty
-    | PNondet -> col.col2_empty
-    | PVar x -> col.col2_var env x
-    | PAlias(p,x) -> col.col2_pat env p ++ col.col2_var env x
-    | PConst t -> col.col2_term env t
-    | PConstr(_,ps) -> List.fold_left (fun acc p -> acc ++ col.col2_pat env p) col.col2_empty ps
-    | PNil -> col.col2_empty
-    | PCons(p1,p2) -> col.col2_pat env p1 ++ col.col2_pat env p2
-    | PTuple ps -> List.fold_left (fun acc p -> acc ++ col.col2_pat env p) col.col2_empty ps
-    | PRecord pats -> List.fold_left (fun acc (_,p) -> acc ++ col.col2_pat env p) col.col2_empty pats
-    | POr(p1,p2) -> col.col2_pat env p1 ++ col.col2_pat env p2
-    | PNone -> col.col2_empty
-    | PSome p -> col.col2_pat env p
-    | PWhen(p,cond) -> col.col2_pat env p ++ col.col2_term env cond
-  in
-  col.col2_app r1 r2
-
-let col2_info col env = function
-  | InfoInt _ -> col.col2_empty
-  | InfoString _ -> col.col2_empty
-  | InfoId x -> col.col2_var env x
-  | InfoTerm t -> col.col2_term env t
-  | InfoIdTerm(x, t) -> col.col2_app (col.col2_var env x) (col.col2_term env t)
-
-let col2_const col env c =
-  match c with
-  | Rand(typ,_) -> col.col2_typ env typ
-  | _ -> col.col2_empty
-
-let col2_decl col env decl =
-  match decl with
-  | Decl_let defs ->
-      let aux acc (x,t) =
-        col.col2_app acc @@
-        col.col2_app (col.col2_var env x) (col.col2_term env t)
-      in
-      List.fold_left aux col.col2_empty defs
-  | Decl_type decls -> col2_list col (snd |- col.col2_typ env) decls
-  | Open m -> col.col2_var env m
-
-let col2_desc col env desc =
-  let (++) = col.col2_app in
-  match desc with
-  | End_of_definitions -> col.col2_empty
-  | Const c -> col.col2_const env c
-  | Var y -> col.col2_var env y
-  | Fun(y, t) -> col.col2_var env y ++ col.col2_term env t
-  | App(t1, ts) -> List.fold_left (fun acc t -> acc ++ col.col2_term env t) (col.col2_term env t1) ts
-  | If(t1, t2, t3) -> col.col2_term env t1 ++ col.col2_term env t2 ++ col.col2_term env t3
-  | Local(decl, t2) -> col.col2_term env t2 ++ col.col2_decl env decl
-  | BinOp(_, t1, t2) -> col.col2_term env t1 ++ col.col2_term env t2
-  | Not t1 -> col.col2_term env t1
-  | Event _ -> col.col2_empty
-  | Record fields -> List.fold_left (fun acc (_,t1) -> acc ++ col.col2_term env t1) col.col2_empty fields
-  | Field(t1,_) -> col.col2_term env t1
-  | SetField(t1,_,t2) -> col.col2_term env t1 ++ col.col2_term env t2
-  | Nil -> col.col2_empty
-  | Cons(t1,t2) -> col.col2_term env t1 ++ col.col2_term env t2
-  | Constr(_,ts) -> List.fold_left (fun acc t -> acc ++ col.col2_term env t) col.col2_empty ts
-  | Match(t1,pats) ->
-      let aux acc (pat,t1) =
-        acc ++
-        col.col2_pat env pat ++
-        col.col2_term env t1
-      in
-      List.fold_left aux (col.col2_term env t1) pats
-  | Raise t -> col.col2_term env t
-  | TryWith(t1,t2) -> col.col2_term env t1 ++ col.col2_term env t2
-  | Tuple ts -> List.fold_left (fun acc t -> acc ++ col.col2_term env t) col.col2_empty ts
-  | Proj(_,t) -> col.col2_term env t
-  | Bottom -> col.col2_empty
-  | Label(info, t) -> col.col2_info env info ++ col.col2_term env t
-  | Ref t -> col.col2_term env t
-  | Deref t -> col.col2_term env t
-  | SetRef(t1,t2) -> col.col2_term env t1 ++ col.col2_term env t2
-  | TNone -> col.col2_empty
-  | TSome t -> col.col2_term env t
-  | Module decls -> List.fold_left (fun acc decl -> acc ++ col.col2_decl env decl) col.col2_empty decls
-  | MemSet(t1, t2) -> col.col2_term env t1 ++ col.col2_term env t2
-  | AddSet(t1, t2) -> col.col2_term env t1 ++ col.col2_term env t2
-  | Subset(t1, t2) -> col.col2_term env t1 ++ col.col2_term env t2
-
-let col2_term col env t = col.col2_app (col.col2_desc env t.desc) (col.col2_typ env t.typ)
-
-
-let make_col2  : 'a -> ('a -> 'a -> 'a) -> ('a,'b) col2 = fun (empty:'a) app ->
-  let f _ _ = empty in
-  let col =
-    {col2_term = f;
-     col2_term_rec = f;
-     col2_desc = f;
-     col2_desc_rec = f;
-     col2_typ = f;
-     col2_typ_rec = f;
-     col2_var = f;
-     col2_var_rec = f;
-     col2_pat = f;
-     col2_pat_rec = f;
-     col2_info = f;
-     col2_info_rec = f;
-     col2_const = f;
-     col2_const_rec = f;
-     col2_decl = f;
-     col2_decl_rec = f;
-     col2_attr = f;
-     col2_app = app;
-     col2_empty = empty}
-  in
-  col.col2_term <- col2_term col;
-  col.col2_term_rec <- col2_term col;
-  col.col2_desc <- col2_desc col;
-  col.col2_desc_rec <- col2_desc col;
-  col.col2_typ <- col2_typ col;
-  col.col2_typ_rec <- col2_typ col;
-  col.col2_var <- col2_var col;
-  col.col2_var_rec <- col2_var col;
-  col.col2_pat <- col2_pat col;
-  col.col2_pat_rec <- col2_pat col;
-  col.col2_info <- col2_info col;
-  col.col2_info_rec <- col2_info col;
-  col.col2_decl <- col2_decl col;
-  col.col2_decl_rec <- col2_decl col;
-  col.col2_const <- col2_const col;
-  col.col2_const_rec <- col2_const col;
-  col
-
-
-
-
-type ('a,'b) tr_col2 =
-  {mutable tr_col2_term:      'b -> term    -> 'a * term;
-   mutable tr_col2_term_rec:  'b -> term    -> 'a * term;
-   mutable tr_col2_desc:      'b -> desc          -> 'a * desc;
-   mutable tr_col2_desc_rec:  'b -> desc          -> 'a * desc;
-   mutable tr_col2_typ:       'b -> typ           -> 'a * typ;
-   mutable tr_col2_typ_rec:   'b -> typ           -> 'a * typ;
-   mutable tr_col2_var:       'b -> id            -> 'a * id;
-   mutable tr_col2_var_rec:   'b -> id            -> 'a * id;
-   mutable tr_col2_pat:       'b -> pattern -> 'a * pattern;
-   mutable tr_col2_pat_rec:   'b -> pattern -> 'a * pattern;
-   mutable tr_col2_info:      'b -> info          -> 'a * info;
-   mutable tr_col2_info_rec:  'b -> info          -> 'a * info;
-   mutable tr_col2_decl:      'b -> declaration   -> 'a * declaration;
-   mutable tr_col2_decl_rec:  'b -> declaration   -> 'a * declaration;
-   mutable tr_col2_const:     'b -> const         -> 'a * const;
-   mutable tr_col2_const_rec: 'b -> const         -> 'a * const;
-   mutable tr_col2_attr:      'b -> attr list     -> 'a * attr list;
-   mutable tr_col2_app: 'a -> 'a -> 'a;
-   mutable tr_col2_empty: 'a}
-
-let tr_col2_list tc tr_col ?(init=tc.tr_col2_empty) env xs =
-  let aux x (acc,xs) =
-    let acc',x' = tr_col env x in
-    tc.tr_col2_app acc acc', x'::xs
-  in
-  List.fold_right aux xs (init,[])
-
-let tr_col2_typ tc env ty =
-  let (++) = tc.tr_col2_app in
-  match ty with
-  | TBase b -> tc.tr_col2_empty, TBase b
-  | TVar({contents=None} as x,id) -> tc.tr_col2_empty, TVar(x,id)
-  | TVar({contents=Some typ},_) -> tc.tr_col2_typ env typ
-  | TFun(x,typ) ->
-      let acc1,x' = tc.tr_col2_var env x in
-      let acc2,typ' = tc.tr_col2_typ env typ in
-      acc1 ++ acc2, TFun(x', typ')
-  | TFuns(xs,typ) ->
-      let acc1,xs' = tr_col2_list tc tc.tr_col2_var env xs in
-      let acc2,typ' = tc.tr_col2_typ env typ in
-      acc1 ++ acc2, TFuns(xs', typ')
-  | TApp(c, typs) ->
-      let acc,typs' = tr_col2_list tc tc.tr_col2_typ env typs in
-      acc, TApp(c, typs')
-  | TTuple xs ->
-      let acc,xs' = tr_col2_list tc tc.tr_col2_var env xs in
-      acc, TTuple xs'
-  | TData s -> tc.tr_col2_empty, TData s
-  | TAttr(attr, typ) ->
-      let aux env a =
-        match a with
-        | TAPred(x,ps) ->
-            let acc,x' = tc.tr_col2_var env x in
-            let acc',ps' = tr_col2_list tc tc.tr_col2_term ~init:acc env ps in
-            acc', TAPred(x',ps')
-        | TARefPred(x,p) ->
-            let acc,x' = tc.tr_col2_var env x in
-            let acc',p' = tc.tr_col2_term env p in
-            acc ++ acc', TARefPred(x',p')
-        | TAPureFun -> tc.tr_col2_empty, TAPureFun
-        | TAEffect e -> tc.tr_col2_empty, TAEffect e
-        | TAPredShare x -> tc.tr_col2_empty, TAPredShare x
-        | TAId(s,n) -> tc.tr_col2_empty, TAId(s,n)
-        | TARaise ty ->
-            let acc,ty' = tc.tr_col2_typ env ty in
-            acc, TARaise ty'
-      in
-      let acc,typ' = tc.tr_col2_typ env typ in
-      let acc',attr' = tr_col2_list tc aux ~init:acc env attr in
-      acc', TAttr(attr', typ')
-  | TVariant(poly,labels) ->
-      let acc,labels' =
-        let aux (s,typs) (acc,labels') =
-          let acc',typs' = tr_col2_list tc tc.tr_col2_typ ~init:acc env typs in
-          acc', (s,typs')::labels'
+  let gen_decl fld acc decl =
+    match decl with
+    | Decl_let defs ->
+        let acc,defs' =
+          gen_list_left ~acc defs
+            ~f:(fun acc (x,t) ->
+              let acc,x' = fld.var acc x in
+              let acc,t' = fld.term acc t in
+              acc, (x',t'))
         in
-        List.fold_right aux labels (tc.tr_col2_empty,[])
-      in
-      acc, TVariant(poly,labels')
-  | TRecord fields ->
-      let acc,fields' =
-        let aux env' (s,(f,typ)) =
-          let acc,typ' = tc.tr_col2_typ env' typ in
-          acc, (s,(f,typ'))
+        acc, Decl_let defs'
+    | Decl_type decls ->
+        let acc,decls' =
+          gen_list ~acc decls
+            ~f:(fun acc (name,(params,ty)) ->
+              let acc,ty' = fld.typ acc ty in
+              acc, (name, (params,ty')))
         in
-        tr_col2_list tc aux env fields
-      in
-      acc, TRecord fields'
-  | TModule {sig_types; sig_values} ->
-      let acc,sig_types =
-        let aux env' (s,typ) =
-          let acc,typ' = tc.tr_col2_typ env' typ in
-          acc, (s,typ')
+        acc, Decl_type decls'
+    | Type_ext(Ext_type ext) ->
+        let acc,ext' = gen_ext fld acc ext in
+        acc, Type_ext(Ext_type ext')
+    | Type_ext(Ext_rebind(s1,s2)) -> acc, Type_ext(Ext_rebind(s1,s2))
+    | Include t ->
+        let acc,t' = fld.term acc t in
+        acc, Include t'
+    | Decl_multi decls ->
+        let acc,decls' = gen_list ~acc ~f:fld.decl decls in
+        acc, Decl_multi decls'
+
+  let rec gen_lid fld acc (lid:lid) : _ * lid =
+    match lid with
+    | LId y ->
+        let acc,y = fld.var acc y in
+        acc, LId y
+    | LDot(p,s) ->
+        let acc,p = gen_lid fld acc p in
+        acc, LDot(p, s)
+    | LApp(p1,p2) ->
+        let acc,p1 = gen_lid fld acc p1 in
+        let acc,p2 = gen_lid fld acc p2 in
+        acc, LApp(p1,p2)
+
+  let gen_desc fld acc = function
+    | End_of_definitions -> acc, End_of_definitions
+    | Const c ->
+        let acc,c' = fld.const acc c in
+        acc, Const c'
+    | Var y ->
+        let acc,y' = gen_lid fld acc y in
+        acc, Var y'
+    | Fun(y, t) ->
+        let acc,y' = fld.var acc y in
+        let acc,t' = fld.term acc t in
+        acc, Fun(y',t')
+    | App(t1, ts) ->
+        if Flag.EvalStrategy.app_left_to_right then
+          let acc,t1' = fld.term acc t1 in
+          let acc,ts' = gen_list_left ~f:fld.term ~acc ts in
+          acc, App(t1', ts')
+        else
+          let acc,ts' = gen_list_right ~f:fld.term ~acc ts in
+          let acc,t1' = fld.term acc t1 in
+          acc, App(t1', ts')
+    | If(t1, t2, t3) ->
+        let acc,t1' = fld.term acc t1 in
+        let acc,t2' = fld.term acc t2 in
+        let acc,t3' = fld.term acc t3 in
+        acc, If(t1',t2',t3')
+    | Local(decl, t2) ->
+        let acc,decl' = fld.decl acc decl in
+        let acc,t2' = fld.term acc t2 in
+        acc, _Local decl' t2'
+    | BinOp(op, t1, t2) ->
+        if Flag.EvalStrategy.binop_left_to_right || List.mem op [And;Or] then
+          let acc,t1' = fld.term acc t1 in
+          let acc,t2' = fld.term acc t2 in
+          acc, BinOp(op,t1',t2')
+        else
+          let acc,t2' = fld.term acc t2 in
+          let acc,t1' = fld.term acc t1 in
+          acc, BinOp(op,t1',t2')
+    | Not t1 ->
+        let acc,t1' = fld.term acc t1 in
+        acc, Not t1'
+    | Event(s,b) -> acc, Event(s,b)
+    | Record fields ->
+        let acc,fields' =
+          let fold = if Flag.EvalStrategy.record_left_to_right then gen_list_left else gen_list_right in
+          fold ~acc fields
+            ~f:(fun acc (s,t1) ->
+              let acc,t1' = fld.term acc t1 in
+              acc, (s,t1'))
         in
-        tr_col2_list tc aux env sig_types
-      in
-      let acc,sig_values = tr_col2_list tc tc.tr_col2_var ~init:acc env sig_values in
-      acc, TModule {sig_types; sig_values}
-
-let tr_col2_var tc env x =
-  let acc,typ' = tc.tr_col2_typ env (Id.typ x) in
-  acc, Id.set_typ x typ'
-
-let tr_col2_pat tc env p =
-  let (++) = tc.tr_col2_app in
-  let acc1,typ = tc.tr_col2_typ env p.pat_typ in
-  let acc2,desc =
-    match p.pat_desc with
-    | PAny -> tc.tr_col2_empty, PAny
-    | PNondet -> tc.tr_col2_empty, PNondet
-    | PVar x ->
-        let acc,x' = tc.tr_col2_var env x in
-        acc, PVar x'
-    | PAlias(p,x) ->
-        let acc1,p' = tc.tr_col2_pat env p in
-        let acc2,x' = tc.tr_col2_var env x in
-        acc1 ++ acc2, PAlias(p',x')
-    | PConst t ->
-        let acc,t' = tc.tr_col2_term env t in
-        acc, PConst t'
-    | PConstr(s,ps) ->
-        let acc,ps' = tr_col2_list tc tc.tr_col2_pat env ps in
-        acc, PConstr(s,ps')
-    | PNil -> tc.tr_col2_empty, PNil
-    | PCons(p1,p2) ->
-        let acc1,p1' = tc.tr_col2_pat env p1 in
-        let acc2,p2' = tc.tr_col2_pat env p2 in
-        acc1 ++ acc2, PCons(p1', p2')
-    | PTuple ps ->
-        let acc,ps' = tr_col2_list tc tc.tr_col2_pat env ps in
-        acc, PTuple ps'
-    | PRecord pats ->
-        let aux env (s,p) =
-          let acc',p' = tc.tr_col2_pat env p in
-          acc', (s,p')
+        acc, Record fields'
+    | Field(t1,s) ->
+        let acc,t1' = fld.term acc t1 in
+        acc, Field(t1',s)
+    | SetField(t1,s,t2) ->
+        if Flag.EvalStrategy.setfield_left_to_right then
+          let acc,t1' = fld.term acc t1 in
+          let acc,t2' = fld.term acc t2 in
+          acc, SetField(t1',s,t2')
+        else
+          let acc,t2' = fld.term acc t2 in
+          let acc,t1' = fld.term acc t1 in
+          acc, SetField(t1',s,t2')
+    | Nil -> acc, Nil
+    | Cons(t1,t2) ->
+        if Flag.EvalStrategy.constr_left_to_right then
+          let acc,t1' = fld.term acc t1 in
+          let acc,t2' = fld.term acc t2 in
+          acc, Cons(t1',t2')
+        else
+          let acc,t2' = fld.term acc t2 in
+          let acc,t1' = fld.term acc t1 in
+          acc, Cons(t1',t2')
+    | Constr(b,s,ts) ->
+        let acc,ts' =
+          let fold = if Flag.EvalStrategy.constr_left_to_right then gen_list_left else gen_list_right in
+          fold ~f:fld.term ~acc ts
         in
-        let acc,pats' = tr_col2_list tc aux env pats in
-        acc, PRecord pats'
-    | POr(p1,p2) ->
-        let acc1,p1' = tc.tr_col2_pat env p1 in
-        let acc2,p2' = tc.tr_col2_pat env p2 in
-        acc1 ++ acc2, POr(p1', p2')
-    | PNone -> tc.tr_col2_empty, PNone
-    | PSome p ->
-        let acc,p' = tc.tr_col2_pat env p in
-        acc, PSome p'
-    | PWhen(p,cond) ->
-        let acc1,p' = tc.tr_col2_pat env p in
-        let acc2,cond' = tc.tr_col2_term env cond in
-        acc1 ++ acc2, PWhen(p', cond')
-  in
-  acc1 ++ acc2, {pat_desc=desc; pat_typ=typ}
-
-let tr_col2_info tc env = function
-  | InfoInt n -> tc.tr_col2_empty, InfoInt n
-  | InfoString s -> tc.tr_col2_empty, InfoString s
-  | InfoId x ->
-      let acc,x' = tc.tr_col2_var env x in
-      acc, InfoId x'
-  | InfoTerm t ->
-      let acc,t' = tc.tr_col2_term env t in
-      acc, InfoTerm t'
-  | InfoIdTerm(x,t) ->
-      let acc1,x' = tc.tr_col2_var env x in
-      let acc2,t' = tc.tr_col2_term env t in
-      tc.tr_col2_app acc1 acc2, InfoIdTerm(x',t')
-
-let tr_col2_const tc env c =
-  match c with
-  | Rand(typ,b) ->
-      let acc,typ' = tc.tr_col2_typ env typ in
-      acc, Rand(typ',b)
-  | _ -> tc.tr_col2_empty, c
-
-let tr_col2_decl tc env decl =
-  match decl with
-  | Decl_let defs ->
-      let aux env (x,t) =
-        let acc1,x' = tc.tr_col2_var env x in
-        let acc2,t' = tc.tr_col2_term env t in
-        tc.tr_col2_app acc1 acc2, (x',t')
-      in
-      let acc,defs' = tr_col2_list tc aux env defs in
-      acc, Decl_let defs'
-  | Decl_type decls ->
-      let aux env (name,ty) =
-        let acc, ty' = tc.tr_col2_typ env ty in
-        acc, (name, ty')
-      in
-      let acc,decls' = tr_col2_list tc aux env decls in
-      acc, Decl_type decls'
-  | Open m ->
-      let acc, m' = tc.tr_col2_var env m in
-      acc, Open m'
-
-let tr_col2_desc tc env desc =
-  let (++) = tc.tr_col2_app in
-  match desc with
-  | End_of_definitions -> tc.tr_col2_empty, End_of_definitions
-  | Const c ->
-      let acc,c' = tc.tr_col2_const env c in
-      acc, Const c'
-  | Var y ->
-      let acc,y' = tc.tr_col2_var env y in
-      acc, Var y'
-  | Fun(y, t) ->
-      let acc1,y' = tc.tr_col2_var env y in
-      let acc2,t' = tc.tr_col2_term env t in
-      acc1 ++ acc2, Fun(y',t')
-  | App(t1, ts) ->
-      let acc,t1' = tc.tr_col2_term env t1 in
-      let acc',ts' = tr_col2_list tc tc.tr_col2_term ~init:acc env ts in
-      acc', App(t1', ts')
-  | If(t1, t2, t3) ->
-      let acc1,t1' = tc.tr_col2_term env t1 in
-      let acc2,t2' = tc.tr_col2_term env t2 in
-      let acc3,t3' = tc.tr_col2_term env t3 in
-      tc.tr_col2_app acc1 @@ tc.tr_col2_app acc2 acc3, If(t1',t2',t3')
-  | Local(decl, t2) ->
-      let acc1,decl' = tc.tr_col2_decl env decl in
-      let acc2,t2' = tc.tr_col2_term env t2 in
-      acc1 ++ acc2, Local(decl',t2')
-  | BinOp(op, t1, t2) ->
-      let acc1,t1' = tc.tr_col2_term env t1 in
-      let acc2,t2' = tc.tr_col2_term env t2 in
-      acc1 ++ acc2, BinOp(op,t1',t2')
-  | Not t1 ->
-      let acc,t1' = tc.tr_col2_term env t1 in
-      acc, Not t1'
-  | Event(s,b) -> tc.tr_col2_empty, Event(s,b)
-  | Record fields ->
-      let aux env (s,t1) =
-        let acc,t1' = tc.tr_col2_term env t1 in
-        acc, (s,t1')
-      in
-      let acc,fields' = tr_col2_list tc aux env fields in
-      acc, Record fields'
-  | Field(t1,s) ->
-      let acc,t1' = tc.tr_col2_term env t1 in
-      acc, Field(t1',s)
-  | SetField(t1,s,t2) ->
-      let acc1,t1' = tc.tr_col2_term env t1 in
-      let acc2,t2' = tc.tr_col2_term env t2 in
-      acc1 ++ acc2, SetField(t1',s,t2')
-  | Nil -> tc.tr_col2_empty, Nil
-  | Cons(t1,t2) ->
-      let acc1,t1' = tc.tr_col2_term env t1 in
-      let acc2,t2' = tc.tr_col2_term env t2 in
-      acc1 ++ acc2, Cons(t1',t2')
-  | Constr(s,ts) ->
-      let acc,ts' = tr_col2_list tc tc.tr_col2_term env ts in
-      acc, Constr(s,ts')
-  | Match(t1,pats) ->
-      let aux env (pat,t1) =
-        let acc1,pat' = tc.tr_col2_pat env pat in
-        let acc2,t1' = tc.tr_col2_term env t1 in
-        acc1 ++ acc2, (pat',t1')
-      in
-      let acc,t1' = tc.tr_col2_term env t1 in
-      let acc',pats' = tr_col2_list tc aux ~init:acc env pats in
-      acc', Match(t1',pats')
-  | Raise t ->
-      let acc,t' = tc.tr_col2_term env t in
-      acc, Raise t'
-  | TryWith(t1,t2) ->
-      let acc1,t1' = tc.tr_col2_term env t1 in
-      let acc2,t2' = tc.tr_col2_term env t2 in
-      acc1 ++ acc2, TryWith(t1',t2')
-  | Tuple ts ->
-      let acc,ts' = tr_col2_list tc tc.tr_col2_term env ts in
-      acc, Tuple ts'
-  | Proj(i,t) ->
-      let acc,t' = tc.tr_col2_term env t in
-      acc, Proj(i,t')
-  | Bottom -> tc.tr_col2_empty, Bottom
-  | Label(info, t) ->
-      let acc1,t' = tc.tr_col2_term env t in
-      let acc2,info' = tc.tr_col2_info env info in
-      acc1 ++ acc2, Label(info',t')
-  | Ref t ->
-      let acc,t' = tc.tr_col2_term env t in
-      acc, Ref t'
-  | Deref t ->
-      let acc,t' = tc.tr_col2_term env t in
-      acc, Deref t'
-  | SetRef(t1,t2) ->
-      let acc1,t1' = tc.tr_col2_term env t1 in
-      let acc2,t2' = tc.tr_col2_term env t2 in
-      acc1 ++ acc2, SetRef(t1',t2')
-  | TNone -> tc.tr_col2_empty, TNone
-  | TSome t ->
-      let acc,t' = tc.tr_col2_term env t in
-      acc, TSome t'
-  | Module decls ->
-      let acc,decls' = tr_col2_list tc tc.tr_col2_decl env decls in
-      acc, Module decls'
-  | MemSet(t1, t2) ->
-      let acc1,t1' = tc.tr_col2_term env t1 in
-      let acc2,t2' = tc.tr_col2_term env t2 in
-      acc1 ++ acc2, MemSet(t1',t2')
-  | AddSet(t1, t2) ->
-      let acc1,t1' = tc.tr_col2_term env t1 in
-      let acc2,t2' = tc.tr_col2_term env t2 in
-      acc1 ++ acc2, AddSet(t1',t2')
-  | Subset(t1, t2) ->
-      let acc1,t1' = tc.tr_col2_term env t1 in
-      let acc2,t2' = tc.tr_col2_term env t2 in
-      acc1 ++ acc2, Subset(t1',t2')
-
-
-let tr_col2_term tc env t =
-  let (++) = tc.tr_col2_app in
-  let acc1,desc = tc.tr_col2_desc env t.desc in
-  let acc2,typ = tc.tr_col2_typ env t.typ in
-  let acc3,attr = tc.tr_col2_attr env t.attr in
-  acc1++acc2++acc3, {desc; typ; attr}
-
-
-let make_tr_col2 empty app =
-  let f _ x = empty, x in
-  let tc =
-    {tr_col2_term = f;
-     tr_col2_term_rec = f;
-     tr_col2_desc = f;
-     tr_col2_desc_rec = f;
-     tr_col2_typ = f;
-     tr_col2_typ_rec = f;
-     tr_col2_var = f;
-     tr_col2_var_rec = f;
-     tr_col2_pat = f;
-     tr_col2_pat_rec = f;
-     tr_col2_info = f;
-     tr_col2_info_rec = f;
-     tr_col2_decl = f;
-     tr_col2_decl_rec = f;
-     tr_col2_const = f;
-     tr_col2_const_rec = f;
-     tr_col2_attr = f;
-     tr_col2_app = app;
-     tr_col2_empty = empty}
-  in
-  tc.tr_col2_term <- tr_col2_term tc;
-  tc.tr_col2_term_rec <- tr_col2_term tc;
-  tc.tr_col2_desc <- tr_col2_desc tc;
-  tc.tr_col2_desc_rec <- tr_col2_desc tc;
-  tc.tr_col2_typ <- tr_col2_typ tc;
-  tc.tr_col2_typ_rec <- tr_col2_typ tc;
-  tc.tr_col2_var <- tr_col2_var tc;
-  tc.tr_col2_var_rec <- tr_col2_var tc;
-  tc.tr_col2_pat <- tr_col2_pat tc;
-  tc.tr_col2_pat_rec <- tr_col2_pat tc;
-  tc.tr_col2_info <- tr_col2_info tc;
-  tc.tr_col2_info_rec <- tr_col2_info tc;
-  tc.tr_col2_decl <- tr_col2_decl tc;
-  tc.tr_col2_decl_rec <- tr_col2_decl tc;
-  tc.tr_col2_const <- tr_col2_const tc;
-  tc.tr_col2_const_rec <- tr_col2_const tc;
-  tc
-
-
-
-
-
-
-
-type 'a fold_tr =
-  {mutable fld_term:      'a -> term        -> 'a * term;
-   mutable fld_term_rec:  'a -> term        -> 'a * term;
-   mutable fld_desc:      'a -> desc        -> 'a * desc;
-   mutable fld_desc_rec:  'a -> desc        -> 'a * desc;
-   mutable fld_typ:       'a -> typ         -> 'a * typ;
-   mutable fld_typ_rec:   'a -> typ         -> 'a * typ;
-   mutable fld_var:       'a -> id          -> 'a * id;
-   mutable fld_var_rec:   'a -> id          -> 'a * id;
-   mutable fld_pat:       'a -> pattern     -> 'a * pattern;
-   mutable fld_pat_rec:   'a -> pattern     -> 'a * pattern;
-   mutable fld_info:      'a -> info        -> 'a * info;
-   mutable fld_info_rec:  'a -> info        -> 'a * info;
-   mutable fld_decl:      'a -> declaration -> 'a * declaration;
-   mutable fld_decl_rec:  'a -> declaration -> 'a * declaration;
-   mutable fld_const:     'a -> const       -> 'a * const;
-   mutable fld_const_rec: 'a -> const       -> 'a * const;
-   mutable fld_attr:      'a -> attr list   -> 'a * attr list}
-
-let fold_tr_list_right tr_col env xs =
-  let aux x (env,xs) =
-    let env',x' = tr_col env x in
-    env', x'::xs
-  in
-  List.fold_right aux xs (env,[])
-let fold_tr_list = fold_tr_list_right
-
-let fold_tr_list_left tr_col env xs =
-  let aux (env,xs_rev) x =
-    let env',x' = tr_col env x in
-    env', x'::xs_rev
-  in
-  let env',xs_rev = List.fold_left aux (env,[]) xs in
-  env', List.rev xs_rev
-
-
-let fold_tr_typ fld env ty =
-  match ty with
-  | TBase b -> env, TBase b
-  | TVar({contents=None} as x,id) -> env, TVar(x,id)
-  | TVar({contents=Some typ},_) -> fld.fld_typ env typ
-  | TFun(x,typ) ->
-      let env',x' = fld.fld_var env x in
-      let env'',typ' = fld.fld_typ env' typ in
-      env'', TFun(x', typ')
-  | TApp(c, typs) ->
-      let env',typs' = fold_tr_list fld.fld_typ env typs in
-      env', TApp(c, typs')
-  | TTuple xs ->
-      let env',xs' = fold_tr_list fld.fld_var env xs in
-      env', TTuple xs'
-  | TData s -> env, TData s
-  | TAttr(attr, typ) ->
-      let aux env a =
-        match a with
-        | TAPred(x,ps) ->
-            let env',x' = fld.fld_var env x in
-            let env'',ps' = fold_tr_list fld.fld_term env' ps in
-            env'', TAPred(x',ps')
-        | TARefPred(x,p) ->
-            let env',x' = fld.fld_var env x in
-            let env'',p' = fld.fld_term env' p in
-            env'', TARefPred(x',p')
-        | TAPureFun -> env, TAPureFun
-        | TAEffect e -> env, TAEffect e
-        | TAPredShare x -> env, TAPredShare x
-        | TAId(s,x) -> env, TAId(s,x)
-        | TARaise ty ->
-            let env,ty' = fld.fld_typ env ty in
-            env, TARaise ty'
-      in
-      let env',attr' = fold_tr_list aux env attr in
-      let env'',typ' = fld.fld_typ env' typ in
-      env'', TAttr(attr', typ')
-  | TVariant(poly,labels) ->
-      let env,labels' =
-        let aux (s,typs) (env,labels') =
-          let env',typs' = fold_tr_list fld.fld_typ env typs in
-          env', (s,typs')::labels'
+        acc, Constr(b,s,ts')
+    | Match(t1,pats) ->
+        let acc,t1' = fld.term acc t1 in
+        let acc,pats' =
+          gen_list_left ~acc pats
+            ~f:(fun acc (pat,t1) ->
+              let acc,pat' = fld.pat acc pat in
+              let acc,t1' = fld.term acc t1 in
+              acc, (pat',t1'))
         in
-        List.fold_right aux labels (env,[])
-      in
-      env, TVariant(poly,labels')
-  | TRecord fields ->
-      let env,fields' =
-        let aux env' (s,(f,typ)) =
-          let env,typ' = fld.fld_typ env' typ in
-          env, (s,(f,typ'))
+        acc, Match(t1',pats')
+    | Raise t ->
+        let acc,t' = fld.term acc t in
+        acc, Raise t'
+    | TryWith(t1,t2) ->
+        let acc,t1' = fld.term acc t1 in
+        let acc,t2' = fld.term acc t2 in
+        acc, TryWith(t1',t2')
+    | Tuple ts ->
+        let acc,ts' =
+          let fold = if Flag.EvalStrategy.tuple_left_to_right then gen_list_left else gen_list_right in
+          fold ~f:fld.term ~acc ts
         in
-        fold_tr_list aux env fields
-      in
-      env, TRecord fields'
-  | TModule {sig_types; sig_values} ->
-      let env,sig_types =
-        let aux env (s,typ) =
-          let env,typ' = fld.fld_typ env typ in
-          env, (s,typ')
-        in
-        fold_tr_list aux env sig_types
-      in
-      let env,sig_values = fold_tr_list fld.fld_var env sig_values in
-      env, TModule {sig_types; sig_values}
-  | TFuns _ -> unsupported "fld"
+        acc, Tuple ts'
+    | Proj(i,t) ->
+        let acc,t' = fld.term acc t in
+        acc, Proj(i,t')
+    | Bottom -> acc, Bottom
+    | Label(info, t) ->
+        let acc,t' = fld.term acc t in
+        let acc,info' = fld.info acc info in
+        acc, Label(info',t')
+    | Ref t ->
+        let acc,t' = fld.term acc t in
+        acc, Ref t'
+    | Deref t ->
+        let acc,t' = fld.term acc t in
+        acc, Deref t'
+    | SetRef(t1,t2) ->
+        if Flag.EvalStrategy.setref_left_to_right then
+          let acc,t1' = fld.term acc t1 in
+          let acc,t2' = fld.term acc t2 in
+          acc, SetRef(t1',t2')
+        else
+          let acc,t2' = fld.term acc t2 in
+          let acc,t1' = fld.term acc t1 in
+          acc, SetRef(t1',t2')
+    | TNone -> acc, TNone
+    | TSome t ->
+        let acc,t' = fld.term acc t in
+        acc, TSome t'
+    | Lazy t ->
+        let acc,t' = fld.term acc t in
+        acc, Lazy t'
+    | Module decls ->
+        let acc,decls' = gen_list_left ~f:fld.decl ~acc decls  in
+        acc, Module decls'
+    | Pack t ->
+        let acc,t' = fld.term acc t in
+        acc, Pack t'
+    | Unpack t ->
+        let acc,t' = fld.term acc t in
+        acc, Unpack t'
+    | MemSet(t1, t2) ->
+          let acc,t1' = fld.term acc t1 in
+          let acc,t2' = fld.term acc t2 in
+          acc, MemSet(t1',t2')
+    | AddSet(t1, t2) ->
+          let acc,t1' = fld.term acc t1 in
+          let acc,t2' = fld.term acc t2 in
+          acc, AddSet(t1',t2')
+    | Subset(t1, t2) ->
+          let acc,t1' = fld.term acc t1 in
+          let acc,t2' = fld.term acc t2 in
+          acc, Subset(t1',t2')
+    | Forall(y, t) ->
+        let acc,y' = fld.var acc y in
+        let acc,t' = fld.term acc t in
+        acc, Forall(y',t')
+    | Exists(y, t) ->
+        let acc,y' = fld.var acc y in
+        let acc,t' = fld.term acc t in
+        acc, Exists(y',t')
 
-let fold_tr_var fld env x =
-  let env',typ' = fld.fld_typ env (Id.typ x) in
-  env', Id.set_typ x typ'
+  let gen_term fld acc t =
+    let acc,desc = fld.desc acc (desc t) in
+    let acc,typ = fld.typ acc t.typ in
+    let acc,attr = fld.attr acc t.attr in
+    acc, {desc; typ; attr}
 
-let fold_tr_pat fld env p =
-  let env',typ = fld.fld_typ env p.pat_typ in
-  let env'',desc =
-    match p.pat_desc with
-    | PAny -> env', PAny
-    | PNondet -> env', PNondet
-    | PVar x ->
-        let env'',x' = fld.fld_var env' x in
-        env'', PVar x'
-    | PAlias(p,x) ->
-        let env'',p' = fld.fld_pat env' p in
-        let env''',x' = fld.fld_var env'' x in
-        env''', PAlias(p',x')
-    | PConst t ->
-        let env'',t' = fld.fld_term env' t in
-        env'', PConst t'
-    | PConstr(s,ps) ->
-        let env'',ps' = fold_tr_list fld.fld_pat env ps in
-        env'', PConstr(s,ps')
-    | PNil -> env', PNil
-    | PCons(p1,p2) ->
-        let env'',p1' = fld.fld_pat env' p1 in
-        let env''',p2' = fld.fld_pat env'' p2 in
-        env''', PCons(p1', p2')
-    | PTuple ps ->
-        let env'',ps' = fold_tr_list fld.fld_pat env' ps in
-        env'', PTuple ps'
-    | PRecord pats ->
-        let aux env (s,p) =
-          let env',p' = fld.fld_pat env p in
-          env', (s,p')
-        in
-        let env'',pats' = fold_tr_list aux env' pats in
-        env'', PRecord pats'
-    | POr(p1,p2) ->
-        let env'',p1' = fld.fld_pat env' p1 in
-        let env''',p2' = fld.fld_pat env'' p2 in
-        env''', POr(p1', p2')
-    | PNone -> env', PNone
-    | PSome p ->
-        let env'',p' = fld.fld_pat env' p in
-        env'', PSome p'
-    | PWhen(p,cond) ->
-        let env'',p' = fld.fld_pat env' p in
-        let env''',cond' = fld.fld_term env'' cond in
-        env''', PWhen(p', cond')
-  in
-  env'', {pat_desc=desc; pat_typ=typ}
+  let list = gen_list
+  let list_left = gen_list_left
+  let list_right = gen_list_right
 
-let fold_tr_info fld env = function
-  | InfoInt n -> env, InfoInt n
-  | InfoString s -> env, InfoString s
-  | InfoId x ->
-      let env',x' = fld.fld_var env x in
-      env', InfoId x'
-  | InfoTerm t ->
-      let env',t' = fld.fld_term env t in
-      env', InfoTerm t'
-  | InfoIdTerm(x,t) ->
-      let env',x' = fld.fld_var env x in
-      let env'',t' = fld.fld_term env' t in
-      env'', InfoIdTerm(x',t')
-
-let fold_tr_const fld env c =
-  match c with
-  | Rand(typ,b) ->
-      let env',typ' = fld.fld_typ env typ in
-      env', Rand(typ',b)
-  | _ -> env, c
-
-let fold_tr_decl fld env decl =
-  match decl with
-  | Decl_let defs ->
-      let aux env (x,t) =
-        let env,x' = fld.fld_var env x in
-        let env,t' = fld.fld_term env t in
-        env, (x',t')
-      in
-      let env,defs' = fold_tr_list_left aux env defs in
-      env, Decl_let defs'
-  | Decl_type decls ->
-      let aux env (name,ty) =
-        let env',ty' = fld.fld_typ env ty in
-        env', (name, ty')
-      in
-      let env',decls' = fold_tr_list aux env decls in
-      env', Decl_type decls'
-  | Open m ->
-      let env',m' = fld.fld_var env m in
-      env', Open m'
-
-let fold_tr_desc fld env = function
-  | End_of_definitions -> env, End_of_definitions
-  | Const c ->
-      let env',c' = fld.fld_const env c in
-      env', Const c'
-  | Var y ->
-      let env',y' = fld.fld_var env y in
-      env', Var y'
-  | Fun(y, t) ->
-      let env',y' = fld.fld_var env y in
-      let env'',t' = fld.fld_term env' t in
-      env'', Fun(y',t')
-  | App(t1, ts) ->
-      if Flag.EvalStrategy.app_left_to_right then
-        let env,t1' = fld.fld_term env t1 in
-        let env,ts' = fold_tr_list_left fld.fld_term env ts in
-        env, App(t1', ts')
-      else
-        let env,ts' = fold_tr_list_right fld.fld_term env ts in
-        let env,t1' = fld.fld_term env t1 in
-        env, App(t1', ts')
-  | If(t1, t2, t3) ->
-      let env',t1' = fld.fld_term env t1 in
-      let env'',t2' = fld.fld_term env' t2 in
-      let env''',t3' = fld.fld_term env'' t3 in
-      env''', If(t1',t2',t3')
-  | Local(decl, t2) ->
-      let env',decl' = fld.fld_decl env decl in
-      let env'',t2' = fld.fld_term env' t2 in
-      env'', Local(decl',t2')
-  | BinOp(op, t1, t2) ->
-      if Flag.EvalStrategy.binop_left_to_right || List.mem op [And;Or] then
-        let env,t1' = fld.fld_term env t1 in
-        let env,t2' = fld.fld_term env t2 in
-        env, BinOp(op,t1',t2')
-      else
-        let env,t2' = fld.fld_term env t2 in
-        let env,t1' = fld.fld_term env t1 in
-        env, BinOp(op,t1',t2')
-  | Not t1 ->
-      let env',t1' = fld.fld_term env t1 in
-      env', Not t1'
-  | Event(s,b) -> env, Event(s,b)
-  | Record fields ->
-      let aux env (s,t1) =
-        let env',t1' = fld.fld_term env t1 in
-        env', (s,t1')
-      in
-      let env',fields' =
-        let fold = if Flag.EvalStrategy.record_left_to_right then fold_tr_list_left else fold_tr_list_right in
-        fold aux env fields
-      in
-      env', Record fields'
-  | Field(t1,s) ->
-      let env',t1' = fld.fld_term env t1 in
-      env', Field(t1',s)
-  | SetField(t1,s,t2) ->
-      if Flag.EvalStrategy.setfield_left_to_right then
-        let env,t1' = fld.fld_term env t1 in
-        let env,t2' = fld.fld_term env t2 in
-        env, SetField(t1',s,t2')
-      else
-        let env,t2' = fld.fld_term env t2 in
-        let env,t1' = fld.fld_term env t1 in
-        env, SetField(t1',s,t2')
-  | Nil -> env, Nil
-  | Cons(t1,t2) ->
-      if Flag.EvalStrategy.constr_left_to_right then
-        let env,t1' = fld.fld_term env t1 in
-        let env,t2' = fld.fld_term env t2 in
-        env, Cons(t1',t2')
-      else
-        let env,t2' = fld.fld_term env t2 in
-        let env,t1' = fld.fld_term env t1 in
-        env, Cons(t1',t2')
-  | Constr(s,ts) ->
-      let env',ts' =
-        let fold = if Flag.EvalStrategy.constr_left_to_right then fold_tr_list_left else fold_tr_list_right in
-        fold fld.fld_term env ts in
-      env', Constr(s,ts')
-  | Match(t1,pats) ->
-      let aux env (pat,t1) =
-        let env,pat' = fld.fld_pat env pat in
-        let env,t1' = fld.fld_term env t1 in
-        env, (pat',t1')
-      in
-      let env,t1' = fld.fld_term env t1 in
-      let env,pats' = fold_tr_list_left aux env pats in
-      env, Match(t1',pats')
-  | Raise t ->
-      let env',t' = fld.fld_term env t in
-      env', Raise t'
-  | TryWith(t1,t2) ->
-      let env',t1' = fld.fld_term env t1 in
-      let env'',t2' = fld.fld_term env' t2 in
-      env'', TryWith(t1',t2')
-  | Tuple ts ->
-      let env',ts' =
-        let fold = if Flag.EvalStrategy.tuple_left_to_right then fold_tr_list_left else fold_tr_list_right in
-        fold fld.fld_term env ts
-      in
-      env', Tuple ts'
-  | Proj(i,t) ->
-      let env',t' = fld.fld_term env t in
-      env', Proj(i,t')
-  | Bottom -> env, Bottom
-  | Label(info, t) ->
-      let env',t' = fld.fld_term env t in
-      let env'',info' = fld.fld_info env' info in
-      env'', Label(info',t')
-  | Ref t ->
-      let env',t' = fld.fld_term env t in
-      env', Ref t'
-  | Deref t ->
-      let env',t' = fld.fld_term env t in
-      env', Deref t'
-  | SetRef(t1,t2) ->
-      if Flag.EvalStrategy.setref_left_to_right then
-        let env,t1' = fld.fld_term env t1 in
-        let env,t2' = fld.fld_term env t2 in
-        env, SetRef(t1',t2')
-      else
-        let env,t2' = fld.fld_term env t2 in
-        let env,t1' = fld.fld_term env t1 in
-        env, SetRef(t1',t2')
-  | TNone -> env, TNone
-  | TSome t ->
-      let env',t' = fld.fld_term env t in
-      env', TSome t'
-  | Module decls ->
-      let env',decls' = fold_tr_list_left fld.fld_decl env decls  in
-      env', Module decls'
-  | MemSet(t1, t2) ->
-        let env,t1' = fld.fld_term env t1 in
-        let env,t2' = fld.fld_term env t2 in
-        env, MemSet(t1',t2')
-  | AddSet(t1, t2) ->
-        let env,t1' = fld.fld_term env t1 in
-        let env,t2' = fld.fld_term env t2 in
-        env, AddSet(t1',t2')
-  | Subset(t1, t2) ->
-        let env,t1' = fld.fld_term env t1 in
-        let env,t2' = fld.fld_term env t2 in
-        env, Subset(t1',t2')
-
-let fold_tr_term fld env t =
-  let env,desc = fld.fld_desc env t.desc in
-  let env,typ = fld.fld_typ env t.typ in
-  let env,attr = fld.fld_attr env t.attr in
-  env, {desc; typ; attr}
-
-
-let make_fold_tr () =
-  let f env x = env, x in
-  let fld =
-    {fld_term = f;
-     fld_term_rec = f;
-     fld_desc = f;
-     fld_desc_rec = f;
-     fld_typ = f;
-     fld_typ_rec = f;
-     fld_var = f;
-     fld_var_rec = f;
-     fld_pat = f;
-     fld_pat_rec = f;
-     fld_info = f;
-     fld_info_rec = f;
-     fld_decl = f;
-     fld_decl_rec = f;
-     fld_const = f;
-     fld_const_rec = f;
-     fld_attr = f}
-  in
-  fld.fld_term <- fold_tr_term fld;
-  fld.fld_term_rec <- fold_tr_term fld;
-  fld.fld_desc <- fold_tr_desc fld;
-  fld.fld_desc_rec <- fold_tr_desc fld;
-  fld.fld_typ <- fold_tr_typ fld;
-  fld.fld_typ_rec <- fold_tr_typ fld;
-  fld.fld_var <- fold_tr_var fld;
-  fld.fld_var_rec <- fold_tr_var fld;
-  fld.fld_pat <- fold_tr_pat fld;
-  fld.fld_pat_rec <- fold_tr_pat fld;
-  fld.fld_info <- fold_tr_info fld;
-  fld.fld_info_rec <- fold_tr_info fld;
-  fld.fld_decl <- fold_tr_decl fld;
-  fld.fld_decl_rec <- fold_tr_decl fld;
-  fld.fld_const <- fold_tr_const fld;
-  fld.fld_const_rec <- fold_tr_const fld;
-  fld
-
+  let make () =
+    let f acc x = acc, x in
+    let fld =
+      {term = f;
+       term_rec = f;
+       desc = f;
+       desc_rec = f;
+       typ = f;
+       typ_rec = f;
+       var = f;
+       lid = f;
+       pat = f;
+       pat_rec = f;
+       info = f;
+       info_rec = f;
+       decl = f;
+       decl_rec = f;
+       const = f;
+       const_rec = f;
+       attr = f}
+    in
+    fld.term      <- gen_term fld;
+    fld.term_rec  <- gen_term fld;
+    fld.desc      <- gen_desc fld;
+    fld.desc_rec  <- gen_desc fld;
+    fld.typ       <- gen_typ fld;
+    fld.typ_rec   <- gen_typ fld;
+    fld.var       <- gen_var fld;
+    fld.lid       <- gen_lid fld;
+    fld.pat       <- gen_pat fld;
+    fld.pat_rec   <- gen_pat fld;
+    fld.info      <- gen_info fld;
+    fld.info_rec  <- gen_info fld;
+    fld.decl      <- gen_decl fld;
+    fld.decl_rec  <- gen_decl fld;
+    fld.const     <- gen_const fld;
+    fld.const_rec <- gen_const fld;
+    fld
+end
 
 
 
 let get_vars =
-  let col = make_col [] (@@@) in
-  col.col_var <- List.singleton;
-  col.col_term
+  let col = Col.make [] (@@@) in
+  col.var <- List.singleton;
+  col.term
 
-let get_bv,get_bv_pat =
-  let col = make_col [] (@@@) in
-  let col_desc desc =
-    match desc with
-    | Fun(x,t) -> x :: col.col_term t
-    | Local(Decl_let bindings,t) ->
-        let aux (f,t) = f :: col.col_term t in
-        col.col_term t @@@ List.rev_map_flatten aux bindings
-    | _ -> col.col_desc_rec desc
-  in
-  let col_pat p =
-    match p.pat_desc with
-    | PVar x -> [x]
-    | _ -> col.col_pat_rec p
-  in
-  col.col_desc <- col_desc;
-  col.col_pat <- col_pat;
-  col.col_typ <- Fun.const [];
-  col.col_term, col.col_pat
+let get_bv_decl ?env decl =
+  match decl with
+  | Decl_let bindings -> List.rev_map fst bindings
+  | Include t ->
+      begin
+        try
+          (sig_of_mod_typ ~env:(Option.default [] env) t.typ).sig_values
+        with Invalid_argument _ | Unsupported _ | Sig_of_Lid _ -> []
+      end
+  | _ -> []
 
+let get_bt_decl ?env decl =
+  match decl with
+  | Decl_type tdecls -> List.rev_map fst tdecls
+  | Include t ->
+      begin
+        try
+          List.rev_flatten_map (List.rev_map fst) (sig_of_mod_typ ~env:(Option.default [] env) t.typ).sig_types
+        with Invalid_argument _ | Unsupported _ | Sig_of_Lid _ -> []
+      end
+  | _ -> []
 
-let get_fv =
-  let col = make_col2 [] (@@@) in
+let get_bv_pat =
+  let col = Col2.make [] (@@@) in
+  col.pat <- (fun force p ->
+    match force, List.find_map_opt (function PABV bv -> Some bv | _ -> None) p.pat_attr with
+    | false, Some bv -> bv
+    | _ ->
+        match p.pat_desc with
+        | PVar x -> [x]
+        | PAlias(p,x)
+        | PEval(x,_,p) -> x :: col.pat force p
+        | _ -> col.pat_rec force p);
+  col.term <- Fun.const2 [];
+  col.typ <- Fun.const2 [];
+  fun ?(force=false) p -> col.pat force p
+
+let get_fv, get_fv_pat, get_fv_decl =
+  let col = Col2.make [] (@@@) in
   let col_desc bv desc =
     match desc with
-    | Var x when Id.mem x bv -> []
-    | Var x when Id.is_primitive x -> []
-    | Var x -> [x]
-    | Local(Decl_let bindings, t2) ->
-        let bv' = List.fold_left (fun bv (f,_) -> f::bv) bv bindings in
-        let aux fv (_,t) = col.col2_term bv' t @@@ fv in
-        let fv_t2 = col.col2_term bv' t2 in
-        List.fold_left aux fv_t2 bindings
-    | Fun(x,t) -> col.col2_term (x::bv) t
+    | Var x when Id.List.mem (head_of_lid x) bv -> []
+    | Var x when Id.is_primitive (head_of_lid x) -> []
+    | Var x -> [head_of_lid x]
+    | Local(decl, _) ->
+        let bv' = get_bv_decl decl @@@ bv in
+        col.desc_rec bv' desc
+    | Fun(x,t) -> col.term (x::bv) t
     | Match(t,pats) ->
-        let aux acc (pat,t) =
-          let bv' = get_bv_pat pat @@@ bv in
-          col.col2_term bv' t @@@ acc
+        let aux acc (p,t) =
+          let bv' = get_bv_pat p @@@ bv in
+          col.term bv' t @@@ col.pat bv p @@@ acc
         in
-        List.fold_left aux (col.col2_term bv t) pats
-    | _ -> col.col2_desc_rec bv desc
+        List.fold_left aux (col.term bv t) pats
+    | Module [] -> []
+    | Module (decl::decls) ->
+        let bv' = get_bv_decl decl @@@ bv in
+        col.decl bv' decl @@@ col.desc bv' (Module decls)
+    | _ -> col.desc_rec bv desc
   in
-  col.col2_desc <- col_desc;
-  col.col2_typ <- Fun.const2 [];
-  fun ?(eq=Id.eq) t ->
-    List.unique ~eq @@ col.col2_term [] t
+  let col_pat bv p =
+    match p.pat_desc with
+    | PWhen(p,t) ->
+        let bv' = get_bv_pat p @@@ bv in
+        col.term bv' t @@@ col.pat bv p
+    | PEval(x,t,p) -> col.term (x::bv) t @@@ col.pat bv p
+    | _ -> col.pat_rec bv p
+  in
+  col.desc <- col_desc;
+  col.pat <- col_pat;
+  col.typ <- Fun.const2 [];
+  col.attr <- Fun.const2 [];
+  col.term [],
+  col.pat [],
+  col.decl []
 
-
-let id_trans = make_trans ()
 
 
 let occur_typ =
-  let col = make_col2 false (||) in
+  let col = Col2.make false (||) in
   let occur_typ x typ =
     match typ with
     | TAttr(attr, typ) ->
@@ -1722,30 +2283,23 @@ let occur_typ =
           | TARefPred(_,p) -> List.exists (Id.same x) @@ get_fv p
           | _ -> false
         in
-        List.exists aux attr || col.col2_typ x typ
-    | _ -> col.col2_typ_rec x typ
+        List.exists aux attr || col.typ x typ
+    | _ -> col.typ_rec x typ
   in
-  col.col2_typ <- occur_typ;
-  col.col2_typ
+  col.typ <- occur_typ;
+  col.typ
 
 
 let is_non_rec bindings =
-  match bindings with
-  | [] -> assert false
-  | [f, t] -> not @@ Id.mem f @@ get_fv t
-  | _ -> false
+  let fvs = List.rev_flatten_map (snd |- get_fv) bindings in
+  not @@ List.exists (fst |- Id.List.mem -$- fvs) bindings
 
-let is_module t =
-  match t.desc, elim_tattr t.typ with
-  | Module _, _
-  | _, TModule _ -> true
-  | _ -> false
+let is_module t = is_mod_typ t.typ
 
-let rec is_functor t =
-  match t.desc, elim_tattr t.typ with
-  | Fun(_,t'), _ -> is_module t' || is_functor t'
-  | _, TFun(_, TModule _) -> true
-  | _ -> false
+let rec is_functor ?default env t =
+  match t.desc with
+  | Fun(_,t') -> is_module t' || is_functor env t'
+  | _ -> is_functor_typ ?default env t.typ
 
 let rec decomp_funs t =
   match t.desc with
@@ -1754,8 +2308,17 @@ let rec decomp_funs t =
       x::xs, t'
   | _ -> [], t
 
+let rec decomp_Decl_multi decl =
+  match decl with
+  | Decl_multi decls ->
+      List.flatten_map decomp_Decl_multi decls
+  | _ -> [decl]
+
 let rec decomp_locals t =
   match t.desc with
+  | Local(Decl_multi _ as decl, t2) ->
+      let decls,t2' = decomp_locals t2 in
+      decomp_Decl_multi decl @ decls, t2'
   | Local(decl, t2) ->
       let decls,t2' = decomp_locals t2 in
       decl::decls, t2'
@@ -1766,3 +2329,151 @@ let decomp_assert_desc desc =
   | If(t1, {desc=Const Unit}, {desc=App({desc=Event("fail",_)}, [{desc=Const Unit}])}) -> Some t1
   | _ -> None
 let is_assert_desc = Option.is_some -| decomp_assert_desc
+
+
+let rec decomp_por p =
+  match p.pat_desc with
+  | POr(p1,p2) -> decomp_por p1 @ decomp_por p2
+  | _ -> [p]
+
+let rec decomp_forall t =
+  match t.desc with
+  | Forall(x,t) ->
+      let xs,t' = decomp_forall t in
+      x::xs, t'
+  | _ -> [], t
+
+let rec decomp_exists t =
+  match t.desc with
+  | Exists(x,t) ->
+      let xs,t' = decomp_exists t in
+      x::xs, t'
+  | _ -> [], t
+
+
+
+let get_fv_attr t =
+  List.find_map_opt (function AFV fv -> Some fv | _ -> None) t.attr
+
+let get_fv ?(force=false) t =
+  if force then
+    get_fv t
+  else
+    match get_fv_attr t with
+    | None -> assert false
+    | Some fv -> fv
+
+let get_fv_unique ?(eq=Id.eq) ?force t =
+  List.unique ~eq @@ get_fv ?force t
+
+let get_fv_pat_attr p =
+  List.find_map_opt (function PAFV fv -> Some fv | _ -> None) p.pat_attr
+
+let get_fv_pat ?(force=false) p =
+  if force then
+    get_fv_pat p
+  else
+    match get_fv_pat_attr p with
+    | None -> get_fv_pat p
+    | Some fv -> fv
+
+let get_fv_list ts =
+  List.rev_flatten_map get_fv ts
+
+let get_fv_shallowly =
+  let module Set = Id.List.Set in
+  let col = Col.make [] (@@@) in
+  let col_desc desc =
+    match desc with
+    | Var x when Id.is_primitive (head_of_lid x) -> []
+    | Var x -> [head_of_lid x]
+    | Local(Decl_let bindings as decl, t2) ->
+        let bv = get_bv_decl decl in
+        let fv = get_fv t2 in
+        List.fold_left (fun acc (_,t) -> Set.((acc @@@ get_fv t) - bv)) fv bindings
+    | Fun(x,t) -> Set.(get_fv t - [x])
+    | Match(t,pats) ->
+        let aux acc (p,t) = Set.(((get_fv_pat p @@@ get_fv t) - get_bv_pat p) @@@ acc) in
+        List.fold_left aux (get_fv t) pats
+    | Module decls ->
+        let aux decl fv = Set.((get_fv_decl decl @@@ fv) - get_bv_decl decl) in
+        List.fold_right aux decls []
+    | _ -> col.desc_rec desc
+  in
+  col.term <- get_fv;
+  col.attr <- Fun.const [];
+  col.typ <- Fun.const [];
+  col.desc <- col_desc;
+  col
+let set_afv_shallowly t =
+  let attr =
+    let fv = get_fv_shallowly.desc t.desc in
+    AFV fv :: List.filter_out (function AFV _ -> true | _ -> false) t.attr
+  in
+  {t with attr}
+
+let set_afv_abv_shallowly_pat p =
+  let fv = get_fv_shallowly.pat p in
+  let bv = get_bv_pat p in
+  let pat_attr =
+    PAFV fv ::
+    PABV bv ::
+    List.filter_out (function PAFV _ | PABV _ -> true | _ -> false) p.pat_attr
+      [@@ocaml.warning "-11"]
+  in
+  {p with pat_attr}
+
+let set_afv,set_afv_abv_pat =
+  let tr = Tr.make () in
+  let tr_term t =
+    t
+    |> tr.term_rec
+    |> set_afv_shallowly
+  in
+  let tr_pat p = (* TODO: use set_afv_abv_shallowly_pat *)
+    let p = tr.pat_rec p in
+    let fv = get_fv_pat ~force:true p in
+    let bv = get_bv_pat ~force:true p in
+    let pat_attr = PAFV fv :: PABV bv :: List.filter_out (function PAFV _ | PABV _ -> true) p.pat_attr in
+    {p with pat_attr}
+  in
+  tr.term <- tr_term;
+  tr.pat <- tr_pat;
+  tr.term, tr.pat
+
+let add_attr ?(force=false) attr t =
+  let cons = if force then List.cons else List.cons_unique ~eq:(=) in
+  let attr = cons attr t.attr in
+  {t with attr}
+
+let make ?(attr=[]) desc typ =
+  set_afv_shallowly {desc; typ; attr}
+
+let make_pattern ?(attr=[]) desc typ =
+  set_afv_abv_pat {pat_desc=desc; pat_typ=typ; pat_attr=attr}
+
+module PrimId = struct
+  let make name attr make_ty =
+    (Id.make name ~attr:(Primitive::attr) -| make_ty),
+    (fun (x:id) -> List.mem Id.Primitive (Id.attr x) && Id.name x = name && Id.id x = 0)
+
+  let array_of_list,is_array_of_list =
+    let mk_ty ty = Ty.(pfun (list ty) (array ty)) in
+    make "Array.of_list" [] mk_ty
+
+  let list_of_array,is_list_of_array =
+    let mk_ty ty = Ty.(pfun (array ty) (list ty)) in
+    make "Array.to_list" [] mk_ty
+end
+
+
+let set_typ t typ = {t with typ}
+let set_pat_desc p desc =
+  make_pattern ~attr:p.pat_attr desc p.pat_typ
+
+(* The following functions must be used carefully *)
+(* Assumed to be used only in Term_util *)
+
+let make_raw ?(attr=[]) desc typ = {desc; typ; attr}
+let set_desc t desc = {t with desc}
+let set_attr t attr = {t with attr}

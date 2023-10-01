@@ -22,6 +22,8 @@ rule token = parse
 | "->" { ARROW }
 | "(*"
     { comment lexbuf }
+| eof
+    { EOF }
 | _
     { raise (LexerError ("illegal token " ^ Lexing.lexeme lexbuf)) }
 

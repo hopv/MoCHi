@@ -1,0 +1,5 @@
+(library
+ (name ppx_mochi)
+ (kind ppx_rewriter)
+ (libraries ppxlib)
+ (preprocess (pps ppxlib.metaquot)))

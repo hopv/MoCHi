@@ -1,6 +1,7 @@
 open Util
+open! Type
 open Syntax
-open Type
+open Type_util
 open Term_util
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
@@ -27,8 +28,8 @@ let term_of_atom a =
 
 let atom_of_term t =
   match t.desc with
-  | App({desc=Var p}, ts) ->
-      let xs = List.map (function {desc=Var x} -> x | _ -> invalid_arg "CHC.atom_of_term") ts in
+  | App({desc=Var (LId p)}, ts) ->
+      let xs = List.map (function {desc=Var (LId x)} -> x | _ -> invalid_arg "CHC.atom_of_term") ts in
       if not @@ Id.is_predicate p then invalid_arg "CHC.atom_of_term";
       PApp(p, xs)
   | App _ ->
@@ -54,7 +55,7 @@ let print fm (constrs:t) =
 let print_one_sol fm (p,(xs,atoms)) = Format.fprintf fm "@[%a := %a@]" print_atom (PApp(p,xs)) (List.print print_atom) atoms
 let print_sol fm sol = List.print print_one_sol fm sol
 
-let check_type_atom a = try Type_check.check (term_of_atom a) ~ty:Ty.bool with _ -> Format.printf "UNTYPABLE: %a@." Print.term' @@ term_of_atom a ;assert false
+let check_type_atom a = try Type_check.check (term_of_atom a) ~ty:Ty.bool with _ -> Format.fprintf !Flag.Print.target "UNTYPABLE: %a@." Print.term' @@ term_of_atom a ;assert false
 let check_type_constr {head;body} = List.iter check_type_atom (head::body)
 let check_type_constrs = List.iter check_type_constr
 
@@ -92,13 +93,13 @@ let rename_map ?(body=false) map a =
       if not (body || List.Set.(disjoint ~eq:Id.eq range (diff ~eq:Id.eq xs dom))) then
         (Format.eprintf "%a %a@." Print.(list (id * id)) map print_atom a;
          invalid_arg "CHC.rename_map");
-      PApp(p, List.map (fun z -> Id.assoc_default z z map) xs)
+      PApp(p, List.map (Id.List.subst map) xs)
   | Term t' -> Term (subst_var_map map t')
 
 let rename ?(body=false) x y a =
   match a with
-  | PApp(p,xs) when Id.mem x xs ->
-      if not body && Id.mem y xs then (Format.eprintf "[%a |-> %a](%a)@." Id.print x Id.print y print_atom a; invalid_arg "CHC.rename");
+  | PApp(p,xs) when Id.List.mem x xs ->
+      if not body && Id.List.mem y xs then (Format.eprintf "[%a |-> %a](%a)@." Id.print x Id.print y print_atom a; invalid_arg "CHC.rename");
       PApp(p, List.map (fun z -> if Id.eq x z then y else z) xs)
   | PApp _ -> a
   | Term t' -> Term (subst_var x y t')
@@ -125,7 +126,7 @@ let normalize_constr {head;body} =
           match xs with
           | [] -> cond, List.rev acc_rev
           | x::xs' ->
-              if Id.mem x xs' then
+              if Id.List.mem x xs' then
                 let x' = Id.new_var_id x in
                 aux (Term Term.(var x = var x')::cond) (x'::acc_rev) xs'
               else
@@ -168,7 +169,7 @@ let apply_sol_atom sol fv a =
   match a with
   | PApp(p,xs) ->
       begin
-        match Id.assoc_opt p sol with
+        match Id.List.assoc_opt p sol with
         | Some (ys,atoms,fv') ->
             let fv'',atoms' =
               if List.Set.disjoint ~eq:Id.eq fv fv' then
@@ -237,7 +238,7 @@ let simplify_trivial (deps,ps,constrs,sol : data) =
         | Term {desc=Const False} -> None
         | Term {desc=BinOp(Eq, t1, t2)} when is_simple_expr t1 && same_term t1 t2 -> loop true body1 body2' head head_fv
         | Term {desc=BinOp(And, t1, t2)} -> loop need_rerun body1 (Term t1::Term t2::body2') head head_fv
-        | Term {desc=BinOp(Eq, {desc=Var x}, {desc=Var y})} when not (Id.mem x head_fv && is_app head && Id.mem y head_fv) ->
+        | Term {desc=BinOp(Eq, {desc=Var (LId x)}, {desc=Var (LId y)})} when not (Id.List.mem x head_fv && is_app head && Id.List.mem y head_fv) ->
             let head' = rename x y head in
             let rn = List.map (rename ~body:true x y) in
             let head_fv' = get_fv head' in
@@ -319,7 +320,7 @@ let simplify_inlining_backward (_deps,_ps,constrs,sol : data) =
                 match xs with
                 | [] -> ts, List.rev acc_rev
                 | x::xs' ->
-                    if Id.mem x xs' then
+                    if Id.List.mem x xs' then
                       let x' = Id.new_var_id x in
                       aux (Term.(var x = var x')::ts) (x'::acc_rev) xs'
                     else
@@ -344,7 +345,7 @@ let simplify_inlining_backward (_deps,_ps,constrs,sol : data) =
         match head with
         | Term _ -> None
         | PApp(f,xs) ->
-            match Id.assoc_opt f goals with
+            match Id.List.assoc_opt f goals with
             | None -> None
             | Some (ys, fv, a) ->
                 let fv' = List.map Id.new_var_id fv in

@@ -150,7 +150,7 @@ let _Let x t1 t2 = Let(x,t1,t2)
 let _Fun x ?typ t = Fun(x, typ, t)
 
 
-let new_id name = Id.to_string (Id.new_var ~name Type.typ_unknown)
+let new_id name = Id.to_string (Id.new_var ~name Type_util.Ty.unknown)
 let decomp_id s =
   try
     let len = String.length s in

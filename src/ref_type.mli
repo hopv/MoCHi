@@ -1,18 +1,16 @@
 
 type t =
   | Base of Type.base * Syntax.id * Syntax.term
-  | ADT of string * Syntax.id * Syntax.term
   | Fun of Syntax.id * t * t
   | Tuple of (Syntax.id * t) list
   | Inter of Syntax.typ * t list
   | Union of Syntax.typ * t list
   | ExtArg of Syntax.id * t * t
   | List of Syntax.id * Syntax.term * Syntax.id * Syntax.term * t
-  | App of constr * t
-  | Variant of (string * t list) list
-  | Record of (string * (Type.mutable_flag * t)) list
+  | Constr of Type.path * t list * Syntax.id * Syntax.term
+  | Variant of (Type.constr * t list) list
+  | Record of (Type.label * (Type.mutable_flag * t)) list
   | Exn of t * t
-and constr = string
 
 module Env : Menv.ENV with type key := Syntax.id with type value := t
 type env = Env.t
@@ -20,7 +18,7 @@ module NegEnv : Menv.ENV with type key := Syntax.id with type value := t
 type neg_env = NegEnv.t
 
 
-(** {6 Constructor} *)
+(** {1 Constructor} *)
 val _Inter : Syntax.typ -> t list -> t
 val _Union : Syntax.typ -> t list -> t
 val _ExtArg : Syntax.id -> t -> t -> t
@@ -35,7 +33,7 @@ val make_tuple : t list -> t
 val make_ref : t -> t
 
 
-(** {6 Destructor} *)
+(** {1 Destructor} *)
 val decomp_base : t -> (Type.base * Syntax.id * Syntax.term) option
 val decomp_fun : t -> (Syntax.id * t * t) option
 val decomp_list : t -> (Syntax.id * Syntax.term * Syntax.id * Syntax.term * t) option
@@ -52,8 +50,8 @@ val is_bottom' : t -> bool
 val has_inter_union : t -> bool
 
 
-(** {6 Transformation} *)
-val make_trans : ?tr:Syntax.trans -> ((t -> t) -> t -> t option) -> t -> t
+(** {1 Transformation} *)
+val make_trans : ?tr:Syntax.Tr.t -> ((t -> t) -> t -> t option) -> t -> t
 val simplify : t -> t
 val remove_subtype : ?sub:(t -> t -> bool) -> t list -> t list
 val remove_equiv : t list -> t list
@@ -61,33 +59,34 @@ val contract : t -> t
 val map_pred : (Syntax.term -> Syntax.term) -> t -> t
 val replace_base_with_int : t -> t
 val replace_list_with_int : t -> t
-val replace_data_with_int : t -> t
-val replace_data_with_int_but_exn : constr list -> t -> t
+val replace_constr_with_int : t -> t
+val replace_constr_with_int_but_exn : Type.path list -> t -> t
+val replace_abst_with_int : t -> t
 
-(** {6 Translator} *)
+(** {1 Translator} *)
 val of_simple : Syntax.typ -> t
 val to_simple : ?with_pred:bool -> t -> Syntax.typ
 val to_abst_typ : ?decomp_pred:bool -> ?with_pred:bool -> t -> Syntax.typ
 
 
-(** {6 Printer} *)
+(** {1 Printer} *)
 val print : Format.formatter -> t -> unit
 
 
-(** {6 Generator} *)
+(** {1 Generator} *)
 val make_strongest : Syntax.typ -> t
 val make_weakest : Syntax.typ -> t
 
 
-(** {6 Substitution} *)
+(** {1 Substitution} *)
 val subst : Syntax.id -> Syntax.term -> t -> t
 val subst_map : (Syntax.id * Syntax.term) list -> t -> t
 val subst_var : Syntax.id -> Syntax.id -> t -> t
 val subst_rev : Syntax.term -> Syntax.id -> t -> t
-val subst_adt : ?force:bool -> string -> t -> t -> t
+val subst_constr : ?force:bool -> Type.path -> t -> t -> t
 
 
-(** {6 Misc} *)
+(** {1 Misc} *)
 val flatten : t -> t
 val occur : Syntax.id -> t -> bool
 val replace_term : Syntax.term -> Syntax.term -> t -> t
@@ -101,8 +100,7 @@ val suptype : t -> t -> bool
 val equiv : t -> t -> bool
 val split_inter : t -> t list
 val is_safe_fun : t -> bool
-val col_adt : t -> string list
-val adt_to_prim : t -> t
+val col_constr : t -> Type.path list
 
 module Ty : sig
   val result : t

@@ -123,11 +123,11 @@ let constraints_def env_orig env (f,xs,t1,_,t2)  =
     constraints_term env_orig' env'' t1 TBase @@
     constraints_term env_orig' env'' t2 r_typ
 
-let print_constraint (typ1,typ2) = Format.printf "%a <: %a@." print_typ typ1 print_typ typ2
+let print_constraint (typ1,typ2) = Format.fprintf !Flag.Print.target "%a <: %a@." print_typ typ1 print_typ typ2
 let print_constraints constrs =
-  Format.printf "Constraints:@.";
+  Format.fprintf !Flag.Print.target "Constraints:@.";
   List.iter print_constraint constrs;
-  Format.printf "@."
+  Format.fprintf !Flag.Print.target "@."
 
 
 let rec subst x y = function
@@ -178,9 +178,9 @@ let solve_constraints (constrs:(typ*typ)list) env =
     solve
 
 let print_env _ env =
-  Format.printf "Environment:@.";
-  List.iter (fun (x,typ) -> Format.printf "%s: %a@." x print_typ typ) env;
-  Format.printf "@."
+  Format.fprintf !Flag.Print.target "Environment:@.";
+  List.iter (fun (x,typ) -> Format.fprintf !Flag.Print.target "%s: %a@." x print_typ typ) env;
+  Format.fprintf !Flag.Print.target "@."
 
 let infer ((env,defs,main):prog) =
   let env' = List.map (fun (f,_) -> (new_env env) f) env in
@@ -244,7 +244,7 @@ let elim ((env,defs,main):prog) : prog =
   let () = counter := 0 in
   let env' = infer (env,defs,main) in
   let defs' = flatten_map (elim_def env') defs in
-    Format.printf "BEFORE:@.%a@.@.%a@.AFTER:@.%a@." CEGAR_print.prog (env,defs,main) print_env env' CEGAR_print.prog (env,defs',main);
+    Format.fprintf !Flag.Print.target "BEFORE:@.%a@.@.%a@.AFTER:@.%a@." CEGAR_print.prog (env,defs,main) print_env env' CEGAR_print.prog (env,defs',main);
     Typing.infer ([],defs',main)
 
 *)
@@ -273,7 +273,7 @@ let calc_scc min n egdes =
   let sccs = List.map (List.map (fun l -> min + G.V.label l)) (G.Components.scc_list g) in
     sccs
 *)
-let calc_scc _ _ _ = raise (Fatal "Not implemented: calc_scc")
+let calc_scc _ _ _ = failwith "Not implemented: calc_scc"
 
 
 
@@ -367,11 +367,11 @@ let constraints_def env_orig env {fn=f;args=xs;cond=t1;body=t2}  =
     constraints_term env_orig' env'' t1 TBase @@@
     constraints_term env_orig' env'' t2 r_typ
 
-let print_constraint (typ1,typ2) = Format.printf "%a <: %a@." print_typ typ1 print_typ typ2
+let print_constraint (typ1,typ2) = Format.fprintf !Flag.Print.target "%a <: %a@." print_typ typ1 print_typ typ2
 let print_constraints constrs =
-  Format.printf "Constraints:@.";
+  Format.fprintf !Flag.Print.target "Constraints:@.";
   List.iter print_constraint constrs;
-  Format.printf "@."
+  Format.fprintf !Flag.Print.target "@."
 
 
 let rec subst x y = function
@@ -415,9 +415,9 @@ let solve_constraints constrs env eqs =
   List.map (Pair.map_snd solve) env
 
 let print_env _ env =
-  Format.printf "Environment:@.";
-  List.iter (fun (x,typ) -> Format.printf "%s: %a@." x print_typ typ) env;
-  Format.printf "@."
+  Format.fprintf !Flag.Print.target "Environment:@.";
+  List.iter (fun (x,typ) -> Format.fprintf !Flag.Print.target "%s: %a@." x print_typ typ) env;
+  Format.fprintf !Flag.Print.target "@."
 
 let infer {env; defs; main} =
   let env' = List.map (new_env env -| fst) env in
@@ -474,7 +474,7 @@ let elim_def env {fn=f;args=xs;cond=t1;body=t2} =
 let elim {env; defs; main; info} =
   let env' = infer {env; defs; main; info} in
   let defs' = List.filter_map (elim_def env') defs in
-  Format.printf "BEFORE:@.%a@.@.%a@.AFTER:@.%a@."
+  Format.fprintf !Flag.Print.target "BEFORE:@.%a@.@.%a@.AFTER:@.%a@."
                 CEGAR_print.prog {env; defs; main; info} print_env env'
                 CEGAR_print.prog {env; defs=defs'; main; info};
   Typing.infer {env=[]; defs=defs'; main; info}

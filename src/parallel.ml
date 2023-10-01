@@ -52,7 +52,7 @@ let make_wait isatty num problems finished =
   wait
 
 let make_problem i preprocessed =
-  let file = Filename.change_extension !!Flag.Input.main @@ Format.sprintf "%d.bin" i in
+  let file = Filename.change_extension !!Flag.IO.temp @@ Format.sprintf "%d.bin" i in
   let status = Filename.change_extension file "status" in
   let cmd = Format.sprintf "%s -s -limit %d %s" Sys.argv.(0) !Flag.Parallel.time file in
   i, (file, status, cmd, preprocessed)
@@ -73,8 +73,7 @@ let check ?(exparam_sol=[]) pps =
   let finished = ref [] in
   let num = List.length pps in
 
-  if !Flag.Print.progress
-  then Color.printf Color.Green "Verifying sub-problems in parallel ... @?";
+  Verbose.printf ~color:Green "Verifying sub-problems in parallel ... @?";
 
   let problems = List.mapi make_problem pps in
   List.iter prepare problems;
@@ -84,7 +83,7 @@ let check ?(exparam_sol=[]) pps =
   Exception.finally
     (fun () -> if isatty then Verbose.printf "%t%a" Cursor.show Cursor.down num)
     (Unix.parallel ~wait !Flag.Parallel.num) commands;
-  if !Flag.Print.progress then Color.printf Color.Green "DONE!@.@.";
+  Verbose.printf ~color:Green "DONE!@.@.";
 
   let result_of (i,(_file,_status,_cmd,preprocessed)) =
     let result,stats =

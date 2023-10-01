@@ -11,23 +11,39 @@ type result =
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
 
-let checksat _env t =
-  t
+type env =
+  {ce : int list;                                      (* counterexample: list of integers whose element represents which branch is taken *)
+   sat : bool;                                         (* true denotes constr is satisfiable *)
+   n : int;                                            (* length of infeasible prefix *)
+   constr : CEGAR_syntax.t;                            (* constraints of which we will check the satisfiability *)
+   tenv : (string * CEGAR_syntax.t CEGAR_type.t) list} (* type environment (actually, types are unused as all variables are assumed to be integers) *)
+
+let init_env ce =
+  {ce;
+   sat = true;
+   n = 0;
+   constr = Const True;
+   tenv = []}
+
+let checksat {constr; _} =
+  constr
   |> Encode_set_theory.add
   |> FpatInterface.conv_formula
   |> Fpat.SMTProver.is_sat_dyn
 
-let get_solution env t =
+let get_solution {tenv; constr; _} =
   let sol =
-    t
+    constr
     |> FpatInterface.conv_formula
     |> Fpat.PolyConstrSolver.solve_dyn
     |> List.map (Pair.map Fpat.Idnt.string_of Fpat.IntTerm.int_of)
   in
-  let sol' = List.map (fun (x,_) -> x, List.assoc_default 0 x sol) env in
+  let sol' = List.map (fun (x,_) -> x, List.assoc_default 0 x sol) tenv in
   List.map snd @@ List.sort compare sol'
 
-let init_cont ce _sat n constr env _ = assert (Flag.(!mode <> FairNonTermination) => (ce=[])); constr, n, env
+let init_cont (env,_) =
+  assert (Flag.(!mode <> FairNonTermination && not !Debug.input_cex) => (env.ce=[]));
+  env
 
 let assoc_def defs n t =
   let defs' = List.filter (fun def -> Var def.fn = t) defs in
@@ -37,7 +53,7 @@ let add_randint_precondition map_randint_to_preds ext_ce rand_precond r = functi
   | None -> rand_precond, ext_ce
   | Some(n) ->
     let new_var = Var(r) in
-    let abst_preds = try (List.assoc n map_randint_to_preds) new_var with Not_found -> Format.printf "not found: %d@." n; [] in
+    let abst_preds = try (List.assoc n map_randint_to_preds) new_var with Not_found -> Format.fprintf !Flag.Print.target "not found: %d@." n; [] in
     let _rand_var = FpatInterface.conv_var r in
     match ext_ce with
     | (m, bs)::ext_ce' when m=n ->
@@ -60,74 +76,73 @@ let add_randint_precondition r n =
   rand_precond_ref := c
 
 let rec check_aux
-          (pr : CEGAR_syntax.t -> int -> int -> unit) (* printer *)
-          (ce : int list) (* counterexample: list of integers whose element represents which branch is taken *)
-          (sat : bool) (* true denotes constr is satisfiable *)
-          (n : int) (* length of infeasible prefix *)
-          (constr : CEGAR_syntax.t) (* constraints of which we will check the satisfiability *)
-          (env : (string * _ CEGAR_type.t) list) (* type environment (actually, types are completely used) *)
+          ?(pr : (CEGAR_syntax.t -> int -> int -> unit) = fun _ _ _ -> ()) (* printer; see print_ce_reduction *)
+          (env : env)
           (defs : CEGAR_syntax.fun_def list) (* function definitions*)
           (t : CEGAR_syntax.t) (* the term to be reduced *)
           k (* continuation *)
   =
-  Debug.printf "check_aux[%d]: %a@." (List.length ce) CEGAR_print.term t;
+  Debug.printf "check_aux[%d]: %a@." (List.length env.ce) CEGAR_print.term t;
   match t with
   | Const (Rand(TInt,_)) -> assert false
-  | Const c -> k ce sat n constr env (Const c)
-  | Var x -> k ce sat n constr env (Var x)
+  | Const c -> k (env, Const c)
+  | Var x -> k (env, Var x)
   | App(Const Not, t) ->
-      check_aux pr ce sat n constr env defs t (fun ce sat n constr env t ->
-      k ce sat n constr env Term.(not t))
+      let@ env,t = check_aux ~pr env defs t in
+      k (env, Term.(not t))
   | App(App(Const op,t1),t2) when is_binop op ->
-      check_aux pr ce sat n constr env defs t1 (fun ce sat n constr env t1 ->
-      check_aux pr ce sat n constr env defs t2 (fun ce sat n constr env t2 ->
-      k ce sat n constr env Term.(t1 <|op|> t2)))
+      let@ env,t1 = check_aux ~pr env defs t1 in
+      let@ env,t2 = check_aux ~pr env defs t2 in
+      k (env, Term.(t1 <|op|> t2))
   | App _ when is_app_randint t ->
       pr t 0 1;
-     if Flag.(!mode = FairNonTermination) && !ext_ce_ref = [] then
-       init_cont ce sat n constr env t
-     else
-       let t',randnum =
-         let t_rand,ts = decomp_app t in
-         match t_rand with
-         | Const (Rand(TInt,randnum)) -> List.last ts, randnum
-         | _ -> assert false
-       in
-       let r = new_id "r" in
-       add_randint_precondition r randnum;
-       let env' = (r,typ_int)::env in
-       check_aux pr ce sat n constr env' defs (App(t',Var r)) k
-  | App(Const (Event "fail"), t) -> init_cont ce sat n constr env t
+      if Flag.(!mode = FairNonTermination) && !ext_ce_ref = [] then
+        init_cont (env,t)
+      else
+        let t',randnum =
+          let t_rand,ts = decomp_app t in
+          match t_rand with
+          | Const (Rand(TInt,randnum)) -> List.last ts, randnum
+          | _ -> assert false
+        in
+        let r = new_id "r" in
+        add_randint_precondition r randnum;
+        let tenv = (r,typ_int)::env.tenv in
+        check_aux ~pr {env with tenv} defs (App(t',Var r)) k
+  | App(Const (Event "fail"), t) -> init_cont (env, t)
   | App(t1,t2) ->
-      check_aux pr ce sat n constr env defs t1 (fun ce sat n constr env t1 ->
-      check_aux pr ce sat n constr env defs t2 (fun ce sat n constr env t2 ->
-      match ce with
-      | [] ->
-          if Flag.(!mode = FairNonTermination) then
-            init_cont ce sat n constr env (App (t1, t2))
-          else
-            assert false
-      | c::ce' ->
-          let t1',ts = decomp_app (App(t1,t2)) in
-          let {args=xs} = List.find (fun def -> Var def.fn = t1') defs in
-          if List.length xs > List.length ts then
-            k ce sat n constr env (App(t1,t2))
-          else
-            let num,{args=xs;cond=tf1;body=tf2} = assoc_def defs c t1' in
-            let ts1,ts2 = List.split_nth (List.length xs) ts in
-            let aux = List.fold_right2 subst xs ts1 in
-            rand_precond_ref := aux !rand_precond_ref;
-            let tf1' = aux tf1 in
-            let tf2' = make_app (aux tf2) ts2 in
-            let constr' = make_and tf1' constr in
-            let n' = if sat then n+1 else n in
-            let sat' = sat && checksat env constr' in
-            assert (List.length xs = List.length ts);
-            assert (ts2 = []);
-            pr t1' c num;
-            check_aux pr ce' sat' n' constr' env defs tf2' k))
-    | Let _ -> assert false
-    | Fun _ -> assert false
+      let@ env,t1 = check_aux ~pr env defs t1 in
+      let@ env,t2 = check_aux ~pr env defs t2 in
+      begin
+        match env.ce with
+        | [] ->
+            if Flag.(!mode = FairNonTermination) then
+              init_cont (env, App (t1, t2))
+            else
+              assert false
+        | c::ce' ->
+            let t1',ts = decomp_app (App(t1,t2)) in
+            let {args=xs} = List.find (fun def -> Var def.fn = t1') defs in
+            if List.length xs > List.length ts then
+              k (env, App(t1,t2))
+            else
+              let num,{args=xs;cond=tf1;body=tf2} = assoc_def defs c t1' in
+              let ts1,ts2 = List.split_nth (List.length xs) ts in
+              let aux = List.fold_right2 subst xs ts1 in
+              rand_precond_ref := aux !rand_precond_ref;
+              let tf1' = aux tf1 in
+              let tf2' = make_app (aux tf2) ts2 in
+              let constr = make_and tf1' env.constr in
+              let n = if env.sat then env.n+1 else env.n in
+              let sat = env.sat && checksat {env with constr} in
+              assert (List.length xs = List.length ts);
+              assert (ts2 = []);
+              pr t1' c num;
+              let env = {env with ce=ce'; sat; n; constr} in
+              check_aux ~pr env defs tf2' k
+      end
+  | Let _ -> assert false
+  | Fun _ -> assert false
 
 let rec get_prefix ce n =
   match ce with
@@ -138,55 +153,51 @@ let rec get_prefix ce n =
 let check ce {defs; main} =
   Verbose.printf "Spurious counterexample::@.  %a@.@." CEGAR_print.ce ce;
   let time_tmp = Time.get () in
-  if !Flag.Print.progress
-  then Color.printf Color.Green "%a(%d-3)[%.3f] Checking counterexample ...%t @?" Color.set Color.Green !Flag.Log.cegar_loop !!Time.get Color.reset;
+  Verbose.printf ~color:Green "%a(%d-3)[%.3f] Checking counterexample ...%t @?" Color.set Green !Flag.Log.cegar_loop !!Time.get Color.reset;
   set_status @@ Flag.Log.Other (Format.sprintf "(%d-3) Feasibility checking" !Flag.Log.cegar_loop);
-  if false then Format.printf "ce:	  %a@." CEGAR_print.ce ce;
+  if false then Format.fprintf !Flag.Print.target "ce:	  %a@." CEGAR_print.ce ce;
   let ce' = List.tl ce in
   let {body=t} = List.find (fun def -> def.fn = main) defs in
-  let pr _ _ _ = () in
-  let constr,n,env' = check_aux pr ce' true 0 (Const True) [] defs t init_cont in
-  let prefix = get_prefix ce (n+1) in
-  Debug.printf "constr: %a@." CEGAR_print.term constr;
+  let env = check_aux (init_env ce') defs t init_cont in
+  let prefix = get_prefix ce (env.n+1) in
+  Debug.printf "constr: %a@." CEGAR_print.term env.constr;
   let result =
-    if checksat env' constr
+    if checksat env
     then
-      let solution = get_solution env' constr in
+      let solution = get_solution env in
       Feasible solution
     else Infeasible prefix
   in
-  if !Flag.Print.progress then Color.printf Color.Green "DONE!@.@.";
+  Verbose.printf ~color:Green "DONE!@.@.";
   Time.add time_tmp Flag.Log.Time.cegar;
   result
 
 let check_non_term ?(map_randint_to_preds = []) ?(ext_ce = []) ce {defs; main} =
-  (* List.iter (fun (n, bs) -> Format.printf "C.E.: %d: %a@." n (print_list Format.pp_print_bool ",") bs) ext_ce; *)
-  if !Flag.Print.progress then Format.printf "Spurious counterexample::@.  %a@.@." CEGAR_print.ce ce;
+  (* List.iter (fun (n, bs) -> Format.fprintf !Flag.Print.target "C.E.: %d: %a@." n (print_list Format.pp_print_bool ",") bs) ext_ce; *)
+  Verbose.printf "Spurious counterexample::@.  %a@.@." CEGAR_print.ce ce;
   let time_tmp = Time.get () in
-  if !Flag.Print.progress then Color.printf Color.Green "(%d-3)[%.3f] Checking counterexample ... @?" !Flag.Log.cegar_loop !!Time.get;
+  Verbose.printf ~color:Green "(%d-3)[%.3f] Checking counterexample ... @?" !Flag.Log.cegar_loop !!Time.get;
   set_status @@ Flag.Log.Other (Format.sprintf "(%d-3) Feasibility checking" !Flag.Log.cegar_loop);
-  if false then Format.printf "ce:        %a@." CEGAR_print.ce ce;
+  if false then Format.fprintf !Flag.Print.target "ce:        %a@." CEGAR_print.ce ce;
   let ce' = List.tl ce in
   let {body=t} = List.find (fun def -> def.fn = main) defs in
-  let pr _ _ _ = () in
   init_refs map_randint_to_preds ext_ce; (* initialize abstraction predicate path of randint *)
-  let constr,n,env' = check_aux pr ce' true 0 (Const True) [] defs t init_cont in
+  let env = check_aux (init_env ce') defs t init_cont in
 
-  let prefix = get_prefix ce (n+1) in
+  let prefix = get_prefix ce (env.n+1) in
   let result =
-    if checksat env' (make_and constr !rand_precond_ref)
-    then
-      let solution = get_solution env' constr in
+    if checksat {env with constr = (make_and env.constr !rand_precond_ref)} then
+      let solution = get_solution env in
 (* @master branch
       let env' = List.sort ~cmp:(Compare.on fst) env' in
       let solution = List.map (fun (x,_) -> List.assoc_default 0 x solution) env'' in
 *)
-      FeasibleNonTerm (FpatInterface.implies [FpatInterface.conv_formula !rand_precond_ref] [FpatInterface.conv_formula constr], env', solution)
+      FeasibleNonTerm (FpatInterface.implies [FpatInterface.conv_formula !rand_precond_ref] [FpatInterface.conv_formula env.constr], env.tenv, solution)
     else Infeasible prefix
   in
-  if !Flag.Print.progress then Color.printf Color.Green "Feasibility constraint: %a@." CEGAR_print.term constr;
-  if !Flag.Print.progress then Color.printf Color.Green "Randint constraint: %a@." CEGAR_print.term !rand_precond_ref;
-  if !Flag.Print.progress then Color.printf Color.Green "DONE!@.@.";
+  Verbose.printf ~color:Green "Feasibility constraint: %a@." CEGAR_print.term env.constr;
+  Verbose.printf ~color:Green "Randint constraint: %a@." CEGAR_print.term !rand_precond_ref;
+  Verbose.printf ~color:Green "DONE!@.@.";
   Time.add time_tmp Flag.Log.Time.cegar;
   result
 
@@ -194,7 +205,7 @@ let check_non_term ?(map_randint_to_preds = []) ?(ext_ce = []) ce {defs; main} =
 
 
 
-let init_cont ce ce_br _env _ = assert (ce=[]); List.rev ce_br
+let init_cont (ce, ce_br, _env, _) = assert (ce=[]); List.rev ce_br
 
 let assoc_def defs n t ce_br =
   let defs' = List.filter (fun def -> Var def.fn = t) defs in
@@ -206,12 +217,12 @@ let rec trans_ce ce ce_br env defs t k =
   Debug.printf "trans_ce[%d]: %a@." (List.length ce) CEGAR_print.term t;
   match t with
   | Const (Rand(TInt,_)) -> assert false
-  | Const c -> k ce ce_br env (Const c)
-  | Var x -> k ce ce_br env (Var x)
+  | Const c -> k (ce, ce_br, env, Const c)
+  | Var x -> k (ce, ce_br, env, Var x)
   | App(App(Const (And|Or|Lt|Gt|Leq|Geq|EqUnit|EqBool|EqInt|Add|Sub|Mul|Div as op),t1),t2) ->
-      trans_ce ce ce_br env defs t1 (fun ce ce_br env t1 ->
-      trans_ce ce ce_br env defs t2 (fun ce ce_br env t2 ->
-      k ce ce_br env Term.(t1 <|op|> t2)))
+      let@ ce,ce_br,env,t1 = trans_ce ce ce_br env defs t1 in
+      let@ ce,ce_br,env,t2 = trans_ce ce ce_br env defs t2 in
+      k (ce, ce_br, env, Term.(t1 <|op|> t2))
 (*
   | App(Const (Event s), t) -> trans_ce ce constr env defs (App(t,Const Unit)) k
 *)
@@ -221,14 +232,14 @@ let rec trans_ce ce ce_br env defs t k =
       trans_ce ce ce_br env' defs (App(t,Var r)) k
   | App(Const (Rand(_,Some _)), _) -> assert false
   | App(Const (Rand(_,None)), _) -> assert false
-  | App(Const (Event "fail"), t1) -> init_cont ce ce_br env t1
+  | App(Const (Event "fail"), t1) -> init_cont (ce, ce_br, env, t1)
   | App(t1,t2) ->
-      trans_ce ce ce_br env defs t1 (fun ce ce_br env t1 ->
-      trans_ce ce ce_br env defs t2 (fun ce ce_br env t2 ->
+      let@ ce,ce_br,env,t1 = trans_ce ce ce_br env defs t1 in
+      let@ ce,ce_br,env,t2 = trans_ce ce ce_br env defs t2 in
       let t1',ts = decomp_app (App(t1,t2)) in
       let {args=xs} = List.find (fun def -> Var def.fn = t1') defs in
       if List.length xs > List.length ts then
-        k ce ce_br env (App(t1,t2))
+        k (ce, ce_br, env, App(t1,t2))
       else
         let ce_br',{args=xs;body=tf2} = assoc_def defs (List.hd ce) t1' ce_br in
         let ts1,ts2 = List.split_nth (List.length xs) ts in
@@ -237,7 +248,7 @@ let rec trans_ce ce ce_br env defs t k =
         let ce' = List.tl ce in
         assert (List.length xs = List.length ts);
         assert (ts2 = []);
-        trans_ce ce' ce_br' env defs tf2' k))
+        trans_ce ce' ce_br' env defs tf2' k
   | Let _ -> assert false
   | Fun _ -> assert false
 
@@ -261,12 +272,12 @@ let print_ce_reduction ?(map_randint_to_preds = []) ?(ext_ce = []) ce {defs=defs
   (* n: Number of the branches *)
   let pr t br n =
     let s1 = if n = 1 then "" else " [" ^ string_of_int (br+1) ^ "/" ^ string_of_int n ^ "]" in
-    Format.printf "%a%s ... --> @\n" CEGAR_print.term t s1
+    Format.fprintf !Flag.Print.target "%a%s ... --> @\n" CEGAR_print.term t s1
   in
   init_refs map_randint_to_preds ext_ce; (* initialize abstraction predicate path of randint *)
-  Format.printf "Error trace::@\n  @[";
+  Format.fprintf !Flag.Print.target "Error trace::@\n  @[";
   pr (Var main) 0 1;
   (match body with
    | App(Const (Event "fail"), _) -> ()
-   | _ -> ignore (check_aux pr ce' true 0 (Const True) [] defs body (fun _ -> assert false)));
-  Format.printf "ERROR!@.@."
+   | _ -> ignore (check_aux ~pr (init_env ce') defs body (fun _ -> assert false)));
+  Format.fprintf !Flag.Print.target "ERROR!@.@."

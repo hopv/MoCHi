@@ -1,0 +1,43 @@
+opam-version: "2.0"
+name: "mochi"
+synopsis: "MoCHi: Model Checker for Higher-Order Programs"
+authors: [
+  "Sato, Ryosuke <rsato@is.s.u-tokyo.ac.jp>"
+  "Hiroshi Unno"
+  "Takuya Kuwahara"
+  "Keiichi Watanabe"
+  "Naoki Iwayama"
+]
+maintainer: ["Sato, Ryosuke <rsato@is.s.u-tokyo.ac.jp>"]
+homepage: ["https://github.com/hopv/MoCHi"]
+bug-reports: ["https://github.com/hopv/MoCHi/issues"]
+
+depends: [
+  "ocaml" {>= "4.08.0" & < "4.15.0"}
+  "z3" {>= "4.8.9"}
+  "dune" {>= "2.5.1"}
+  "batteries" {>= "3.4.0"}
+  "ocamlfind"
+  "ppx_deriving"
+  "ppxlib" {>= "0.26.0"}
+  "yojson"
+  "zarith"
+  "menhir"
+  "fpat" {= "mochi-dev"}
+  "csisat" {= "mochi-dev"}
+  "atp" {= "mochi-dev"}
+  "smtlib-utils" {>= "0.3.1"}
+  "ocamlgraph"
+]
+
+build: [
+  ["autoconf"]
+  ["./configure"]
+  ["dune" "build" "-p" name "-j" jobs]
+]
+
+pin-depends: [
+  ["atp.mochi-dev" "git+https://github.com/ryosu-sato/atp.git"]
+  ["csisat.mochi-dev" "git+https://github.com/ryosu-sato/csisat.git"]
+  ["fpat.mochi-dev" "git+https://github.com/ryosu-sato/fpat.git"]
+]

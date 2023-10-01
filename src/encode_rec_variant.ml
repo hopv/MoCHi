@@ -1,17 +1,18 @@
 open Util
+open Type
+open Type_util
 open Syntax
 open Term_util
-open Type
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
 
-type env = (string * (typ * bool * typ)) list
-  (* string -- 's' of 'TData s'
+type env = (constr * (typ * bool * typ)) list
+  (* constr -- 's' of 'TConstr(s, ...)TData s'
      typ    -- type before encoding
      bool   -- whether recursive or not
      typ    -- type after encoding
    *)
-let abst_recdata : env trans2 = make_trans2 ()
+let abst_recdata : env Tr2.t = Tr2.make ()
 
 let make_ty ty_top ty_f =
   let open Flag.Encode.RecData in
@@ -29,8 +30,8 @@ let get_top_ty ty =
   let open Flag.Encode.RecData in
   match !additional with
   | Nothing -> ty
-  | Top -> Type.fst_typ ty
-  | Unit_top -> Type.proj_typ 1 ty
+  | Top -> fst_typ ty
+  | Unit_top -> proj_typ 1 ty
 let get_element pos t_f =
   let open Flag.Encode.RecData in
   match !additional with
@@ -60,61 +61,70 @@ let get_element pos t_f =
   *)
 let encode_recdata_typ env s ty =
   match ty with
-  | TVariant(false,labels) when List.mem s @@ get_tdata ty ->
+  | TVariant(VNonPoly,rows) when List.exists (fst |- (=) (Type.LId s)) @@ get_tconstr_typ ty ->
       let ty =
-        let aux ty =
-          match ty with
-          | TData s' when s' = s -> Ty.unit
-          | _ when get_tdata ty = [] -> abst_recdata.tr2_typ env ty
-          | _ -> unsupported "encode_variant: non-simple recursion"
+        let rows =
+          rows
+          |> List.map (fun row ->
+                 let row_args =
+                   row.row_args
+                   |> List.map (function
+                          | TConstr(s',_) when s' = Type.LId s -> Ty.unit
+                          | _ when get_tconstr_typ ty = [] -> abst_recdata.typ env ty
+                          | _ -> unsupported "encode_rec_variant: non-simple recursion (use -data-to-int, -ignore-data-arg, etc.)")
+                 in
+                 {row with row_args})
         in
-        TVariant(false, List.map (Pair.map_snd @@ List.map aux) labels)
+        TVariant(VNonPoly, rows)
       in
       make_ty ty Ty.(pfun ~name:"path" (list int) ty)
-  | _ -> abst_recdata.tr2_typ env ty
+  | TVariant(VPoly _, _) -> invalid_arg "%s" __FUNCTION__
+  | _ -> abst_recdata.typ env ty
 
 let abst_recdata_typ env typ =
   match typ with
   | TRecord _ -> unsupported "abst_recdata_typ TRecord"
   | TAttr(attr, ty) ->
       let attr' = List.filter (function TARefPred _ -> false | _ -> true) attr in
-      _TAttr attr' @@ abst_recdata.tr2_typ_rec env ty
-  | _ -> abst_recdata.tr2_typ_rec env typ
+      _TAttr attr' @@ abst_recdata.typ_rec env ty
+  | _ -> abst_recdata.typ_rec env typ
 
 let is_rec_type env ty =
   match elim_tattr ty with
-  | TData s when not @@ List.mem s prim_base_types ->
+  | TConstr((LId s),_) when not @@ is_prim_constr (LId s) ->
       begin
-        try Triple.snd @@ List.assoc s env
+        try Triple.snd @@ Id.List.assoc s env
         with Not_found -> assert false
       end
   | _ -> false
 
 let expand_typ env ty =
   match ty with
-  | TData s when not @@ List.mem s prim_base_types ->
+  | TConstr(LId s,_) when not @@ is_prim_constr (LId s) ->
       begin
-        try Triple.fst @@ List.assoc s env
+        try Triple.fst @@ Id.List.assoc s env
         with Not_found -> assert false
       end
   | _ -> ty
 
-let expand_enc_typ env ty =
+let expand_enc_typ (env:env) ty =
   match ty with
-  | TData s when not @@ List.mem s prim_base_types ->
+  | TConstr(LId s,_) when not @@ is_prim_constr (LId s) ->
       begin
-        try Triple.trd @@ List.assoc s env
+        try Triple.trd @@ Id.List.assoc s env
         with Not_found -> assert false
       end
+  | TConstr((LDot _ | LApp _), _) -> assert false
   | _ -> ty
-let expand_enc_typ_term env t = {t with typ = expand_enc_typ env t.typ}
+let expand_enc_typ_term env t = set_typ t (expand_enc_typ env t.typ)
 
 let term_of_path xs =
   make_list ~typ:Ty.int @@ List.map Term.int xs
 
 let rec abst_recdata_pat_rec env x path p0 =
   match p0.pat_desc with
-  | PConstr(c,ps) ->
+  | PConstr(true,_,_) -> unsupported "%s (poly)" __MODULE__
+  | PConstr(false,c,ps) ->
       let aux i p =
         if p0.pat_typ = p.pat_typ then
           let path' = i::path in
@@ -129,36 +139,38 @@ let rec abst_recdata_pat_rec env x path p0 =
           abst_recdata_pat env p
       in
       let ps',binds = List.split @@ List.mapi aux ps in
-      let pat_typ = get_top_ty @@ expand_enc_typ env @@ abst_recdata.tr2_typ env p0.pat_typ in
-      {pat_desc=PConstr(c,ps'); pat_typ}, List.flatten binds
+      let pat_typ = get_top_ty @@ expand_enc_typ env @@ abst_recdata.typ env p0.pat_typ in
+      make_pattern (PConstr(false,c,ps')) pat_typ,
+      List.flatten binds
   | _ ->
       abst_recdata_pat env p0
 
 and abst_recdata_pat env p =
   let pat_typ =
-    match abst_recdata.tr2_typ env p.pat_typ with
-    | TData s when not @@ List.mem s prim_base_types ->
+    match abst_recdata.typ env p.pat_typ with
+    | TConstr((LId s),[]) when not @@ is_prim_constr (LId s) ->
         assert (List.mem_assoc s env);
-        Triple.trd @@ List.assoc s env
+        Triple.trd @@ Id.List.assoc s env
     | typ -> typ
   in
   let pat_desc,bind =
     match p.pat_desc with
     | PAny -> PAny, []
     | PNondet -> PNondet, []
-    | PVar x -> PVar (abst_recdata.tr2_var env x), []
+    | PVar x -> PVar (abst_recdata.var env x), []
     | PAlias(p,x) ->
         let p',bind = abst_recdata_pat env p in
-        PAlias(p', abst_recdata.tr2_var env x), bind
+        PAlias(p', abst_recdata.var env x), bind
     | PConst t -> PConst t, []
+    | PConstr(true,_,_) -> unsupported "%s" __MODULE__
     | PConstr _ when is_rec_type env p.pat_typ ->
         let x = Id.new_var pat_typ in
         let p',bind = abst_recdata_pat_rec env (Term.var x) [] p in
         let t = get_element (term_of_path []) (Term.var x) in
         PVar x, (t,p')::bind
-    | PConstr(c,ps) ->
+    | PConstr(false,c,ps) ->
         let ps',binds = List.split_map (abst_recdata_pat env) ps in
-        PConstr(c,ps'), List.flatten binds
+        PConstr(false,c,ps'), List.flatten binds
     | PNil -> PNil, []
     | PCons(p1,p2) ->
         let p1',bind1 = abst_recdata_pat env p1 in
@@ -186,32 +198,38 @@ and abst_recdata_pat env p =
         let p',bind = abst_recdata_pat env p in
         PSome p', bind
     | PWhen(p, cond) ->
-        let cond' = abst_recdata.tr2_term env cond in
+        let cond' = abst_recdata.term env cond in
         let p',bind = abst_recdata_pat env p in
         PWhen(p', cond'), bind
+    | PLazy p ->
+        let p',bind = abst_recdata_pat env p in
+        PLazy p', bind
+    | PEval _ -> assert false
   in
-  {pat_desc; pat_typ}, bind
+  make_pattern pat_desc pat_typ,
+  bind
 
 let abst_recdata_term_rec env x_top _path t =
   let ty_orig = t.typ in
   let bind,t_no_effect =
-    let tr = make_tr_col2 [] (@) in
+    let tr = Tr_col2.make [] (@) in
     let tr_term _ t =
       if has_no_effect t then
         [], t
       else
         match t.desc with
-        | Constr(s,ts) ->
-            let binds = List.map (fst -| tr.tr_col2_term ()) ts in
-            let desc = Constr(s,ts) in
-            List.flatten binds, {t with desc}
+        | Constr(true,_,_) -> unsupported "%s (poly)" __MODULE__
+        | Constr(false,s,ts) ->
+            let binds = List.map (fst -| tr.term ()) ts in
+            let desc = Constr(false,s,ts) in
+            List.flatten binds, make desc t.typ
         | _ ->
-            let t' = abst_recdata.tr2_term env t in
+            let t' = abst_recdata.term env t in
             let x = new_var_of_term t' in
             [x, t'], Term.var x
     in
-    tr.tr_col2_term <- tr_term;
-    tr.tr_col2_term () t
+    tr.term <- tr_term;
+    tr.term () t
   in
   let paths =
     let rec aux ix t1 =
@@ -219,7 +237,8 @@ let abst_recdata_term_rec env x_top _path t =
         []
       else
         match t1.desc with
-        | Constr(_,ts) ->
+        | Constr(true,_,_) -> unsupported "%s (poly)" __MODULE__
+        | Constr(false,_,ts) ->
             (ix, None) :: List.flatten_mapi (fun i t -> aux (i::ix) t) ts
         | _ ->
             let tl = Id.new_var Ty.(list int) in
@@ -229,26 +248,26 @@ let abst_recdata_term_rec env x_top _path t =
   in
   let rec proj ix tail t1 =
     if ty_orig <> t1.typ then
-      abst_recdata.tr2_term env t1
+      abst_recdata.term env t1
     else
       match ix, t1.desc with
-      | [], Constr(s1,ts1) ->
+      | [], Constr(false,s1,ts1) ->
           let ts1' =
             let aux t2 =
               if ty_orig = t2.typ then
                 Term.unit
               else
-                abst_recdata.tr2_term env t2
+                abst_recdata.term env t2
             in
             List.map aux ts1
           in
-          let typ = get_top_ty @@ expand_enc_typ env @@ abst_recdata.tr2_typ env t1.typ in
-          {desc=Constr(s1, ts1'); typ; attr=[]}
+          let typ = get_top_ty @@ expand_enc_typ env @@ abst_recdata.typ env t1.typ in
+          make (Constr(false,s1, ts1')) typ
       | [], _ ->
-          let t1' = expand_enc_typ_term env @@ abst_recdata.tr2_term env t1 in
+          let t1' = expand_enc_typ_term env @@ abst_recdata.term env t1 in
           let tl = Option.get tail in
           get_element (Term.var tl) t1'
-      | i::ix', Constr(_s1,ts1) ->
+      | i::ix', Constr(false,_s1,ts1) ->
           proj ix' tail (List.nth ts1 i)
       | _ -> assert false
   in
@@ -261,7 +280,7 @@ let abst_recdata_term_rec env x_top _path t =
   let pat_of_path (ix,tail) =
     let tl =
       match tail with
-      | None -> Pat.nil Ty.int
+      | None -> Pat.nil ~elem_typ:Ty.int
       | Some tl -> Pat.var tl
     in
     List.fold_right Pat.cons (List.map Pat.int ix) tl
@@ -274,17 +293,17 @@ let abst_recdata_term (env: env) t =
   let typ = elim_tattr t.typ in
   match t.desc with
   | Constr _ when is_rec_type env typ ->
-      let x_top = Id.new_var (get_top_ty @@ expand_enc_typ env @@ abst_recdata.tr2_typ env t.typ) in
+      let x_top = Id.new_var (get_top_ty @@ expand_enc_typ env @@ abst_recdata.typ env t.typ) in
       let path = Id.new_var Ty.(list int) in
       let bind,pats = abst_recdata_term_rec env x_top path t in
       Term.(lets bind (make_term (var x_top) (pfun path (match_ (var path) pats))))
   | Match(t1,pats) ->
       let x = new_var_of_term t1 in
-      let t1' = abst_recdata.tr2_term env t1 in
+      let t1' = abst_recdata.term env t1 in
       let aux (p,t) t_acc =
         let t_acc' =
           let p',bind = abst_recdata_pat env p in
-          let t' = abst_recdata.tr2_term env t in
+          let t' = abst_recdata.term env t in
           let pat_acc =
             match t_acc with
             | None -> []
@@ -307,23 +326,23 @@ let abst_recdata_term (env: env) t =
         Some t_acc'
       in
       make_let [x,t1'] @@ Option.get @@ List.fold_right aux pats None
-  | Local(Decl_type [s,ty], t) ->
+  | Local(Decl_type [s,(params,ty)], t) ->
       let ty' = encode_recdata_typ env s ty in
-      let env' = (s, (ty, List.mem s @@ get_tdata ty, ty')) :: env in
-      subst_tdata s ty' @@ abst_recdata.tr2_term env' t
+      let env' = (s, (ty, List.exists (fst |- (=) (Type.LId s)) (get_tconstr_typ ty), ty')) :: env in
+      subst_tconstr s (params,ty') @@ abst_recdata.term env' t
   | Local(Decl_type _decls, _t1) ->
       (* TODO *)
       unsupported "encode_rec: Decl_type"
-  | _ -> abst_recdata.tr2_term_rec env t
+  | _ -> abst_recdata.term_rec env t
 
 let () =
-  abst_recdata.tr2_term <- abst_recdata_term;
-  abst_recdata.tr2_typ <- abst_recdata_typ
+  abst_recdata.term <- abst_recdata_term;
+  abst_recdata.typ <- abst_recdata_typ
 
 let pr s t = Debug.printf "##[encode_rec] %a:@.%a@.@." Color.s_red s Print.term_typ t
 let pr' s t = Debug.printf "##[encode_rec] %a:@.%a@.@." Color.s_red s Print.term' t
 
-let trans_typ = abst_recdata.tr2_typ []
+let trans_typ = abst_recdata.typ []
 let trans_term t =
   let ty = trans_typ t.typ in
   t
@@ -331,7 +350,7 @@ let trans_term t =
   |> Trans.abst_ext_recdata
   |@> pr "abst_ext_rec"
   |@> Type_check.check ~ty
-  |> abst_recdata.tr2_term []
+  |> abst_recdata.term []
   |@> pr "abst_rec"
   |@> pr' "abst_rec with type"
   |@> Type_check.check ~ty
@@ -342,8 +361,8 @@ let trans_term t =
   |@> pr "simplify1"
   |> Trans.inline_var
   |@> pr "simplify3"
-  |> Trans.inst_randval
-  |@> pr "inst_randval"
+  |> Trans.instansiate_randval
+  |@> pr "instansiate_randval"
   |@> Type_check.check ~ty
 
 (******************************************************************************
@@ -352,9 +371,10 @@ let trans_term t =
 
 let gather_env : Syntax.term -> env =
   let rec go env t = match t.desc with
-    | Local(Decl_type [s,ty], t) ->
+    | Local(Decl_type [s,(params,ty)], t) ->
+        if params <> [] then unsupported "Encode_rec_variant";
         let ty' = encode_recdata_typ env s ty in
-        let env' = (s, (ty, List.mem s @@ get_tdata ty, ty')) :: env in
+        let env' = (s, (ty, List.exists (fst |- (=) (Type.LId s)) (get_tconstr_typ ty), ty')) :: env in
         go env' t
     (*| Local(_, t) -> go env t*) (* can be ignored because of Preprocess.Lift_type_decl *)
     | _ -> env
@@ -364,20 +384,21 @@ let gather_env : Syntax.term -> env =
 type sym_env = (string * (term * (int, term) Map.t)) list
 
 let trans_pred =
-  let tr = make_trans2 () in
+  let tr = Tr2.make () in
   let term (x, sym_env) t =
     match t.desc with
-    | Match({desc=Var(y)}, ps) when Id.(x=y) ->
+    | Match({desc=Var (LId y)}, ps) when Id.(x=y) ->
         let labels = List.map fst sym_env in
         let preds =
           snd @@ List.Labels.fold_right ps ~init:(labels,[]) ~f:(
             fun (p, t) (remain, arms) ->
               match p.pat_desc with
-              | PConstr(c, _) when not (List.mem c remain) ->
+              | PConstr(true, _, _) -> unsupported "Encode_rec_variant"
+              | PConstr(false, (LId c), _) when not (List.mem c remain) ->
                   (* already matched (would it be better to raise an error?) *)
                   (remain, List.snoc arms false_term)
-              | PConstr(c, ps) ->
-                  let is_c, map = try List.assoc c sym_env with _ -> assert false in
+              | PConstr(false, (LId c), ps) ->
+                  let is_c, map = try Id.List.assoc c sym_env with _ -> assert false in
                   let remain' = List.remove remain c in
                   let sbst = List.Labels.filter_map (List.mapi Pair.pair ps) ~f:(
                     fun (j, p) ->
@@ -392,23 +413,23 @@ let trans_pred =
                   (remain', List.snoc arms (make_and is_c t'))
               | PVar(y) ->
                   let match_ = make_ors @@
-                    try List.map (fun l -> fst @@ List.assoc l sym_env) remain
+                    try List.map (fun l -> fst @@ Id.List.assoc l sym_env) remain
                     with Not_found -> assert false
                   in
                   let t' = subst y (make_var x) t in
                   ([], List.snoc arms (make_and match_ t'))
               | PAny ->
                   let match_ = make_ors @@
-                    try List.map (fun l -> fst @@ List.assoc l sym_env) remain
+                    try List.map (fun l -> fst @@ Id.List.assoc l sym_env) remain
                     with Not_found -> assert false
                   in
                   ([], List.snoc arms (make_and match_ t))
               | _ -> assert false
           )
         in make_ors preds
-    | _ -> tr.tr2_term_rec (x,sym_env) t
+    | _ -> tr.term_rec (x,sym_env) t
   in
-  tr.tr2_term <- term;
+  tr.term <- term;
   term
 
 (* e.g.1:
@@ -426,7 +447,7 @@ let trans_pred =
         Node, ([tree, int, bool, tree], [int, bool]);
       ]
 *)
-type lts = (string * (typ list * typ list)) list
+type lts = (constr * (typ list * typ list)) list
 
 let mk_sym_env s t (lts:lts) =
   List.Labels.mapi lts ~f:(
@@ -439,7 +460,7 @@ let mk_sym_env s t (lts:lts) =
         let rec go m i j tys tys' =
           match tys, tys' with
           | _, [] -> m
-          | ty::tys, _ when ty = TData s ->
+          | TConstr(s',_)::tys, _ when s = s' ->
               go m (i+1) j tys tys'
           | _::tys, _::tys' ->
               let m' = Map.add i Term.(proj j (snd t_base)) m in
@@ -489,12 +510,13 @@ let trans_rty_rec_data (_s,_x,_t) (_ty_before: typ) (_ty_after: typ) =
 
 let trans_rty_nonrec_data (s,x,t) (ty_before: typ) (ty_after: typ) =
   match ty_before, ty_after with
-  | TVariant(false,ts), TTuple([{Id.typ=ty1};{Id.typ=ty2}]) ->
+  | TVariant(VNonPoly,rows), TTuple([{Id.typ=ty1};{Id.typ=ty2}]) ->
       let xs = match ty1 with TTuple(xs) -> xs | _ -> assert false in
       assert (ty2 = Ty.unit);
       let v = Id.new_var ty1 in
-      let lts = List.Labels.map2 ts xs ~f:(
-        fun (l,tys) x -> (l,(tys, decomp_ttuple (snd_typ @@ Id.typ x)))
+      let lts = List.L.map2 rows xs ~f:(fun row x ->
+                    if row.row_ret <> None then unsupported "%s" __FUNCTION__;
+                    (row.row_constr,(row.row_args, decomp_ttuple (snd_typ @@ Id.typ x)))
       ) in
       let sym_env = mk_sym_env s (make_var v) lts in
       let u = Id.new_var Ty.unit in
@@ -507,33 +529,33 @@ let trans_rty_nonrec_data (s,x,t) (ty_before: typ) (ty_after: typ) =
   | _, _ -> assert false
 
 let rec trans_rty env =
-  let tr = make_trans() in
-  tr.tr_typ <- expand_enc_typ env;
+  let tr = Tr.make() in
+  tr.typ <- expand_enc_typ env;
   let open Ref_type in
   function
-  | ADT(s,x,t) ->
-      let ty_before = expand_typ env (TData s) in
-      let ty_after = expand_enc_typ env (TData s) in
-      if is_rec_type env (TData s)
+  | Constr(s,tys,x,t) ->
+      if tys <> [] then unsupported "Encode_rec_variant";
+      let ty_before = expand_typ env (TConstr(s,[])) in
+      let ty_after = expand_enc_typ env (TConstr(s,[])) in
+      if is_rec_type env (TConstr(s,[]))
       then trans_rty_rec_data (s,x,t) ty_before ty_after
       else trans_rty_nonrec_data (s,x,t) ty_before ty_after
-  | Base(base,x,t) -> Base(base, tr.tr_var x, tr.tr_term t)
-  | Fun(x,ty1,ty2) -> Fun(tr.tr_var x, trans_rty env ty1, trans_rty env ty2)
-  | Tuple xtys -> Tuple(List.map (Pair.map tr.tr_var (trans_rty env)) xtys)
-  | Inter(sty,tys) -> Inter(tr.tr_typ sty, List.map (trans_rty env) tys)
-  | Union(sty,tys) -> Union(tr.tr_typ sty, List.map (trans_rty env) tys)
-  | ExtArg(x,ty1,ty2) -> ExtArg(tr.tr_var x, trans_rty env ty1, trans_rty env ty2)
-  | List(x,p_len,y,p_i,ty2) -> List(tr.tr_var x,
-                                    tr.tr_term p_len,
-                                    tr.tr_var y,
-                                    tr.tr_term p_i,
+  | Base(base,x,t) -> Base(base, tr.var x, tr.term t)
+  | Fun(x,ty1,ty2) -> Fun(tr.var x, trans_rty env ty1, trans_rty env ty2)
+  | Tuple xtys -> Tuple(List.map (Pair.map tr.var (trans_rty env)) xtys)
+  | Inter(sty,tys) -> Inter(tr.typ sty, List.map (trans_rty env) tys)
+  | Union(sty,tys) -> Union(tr.typ sty, List.map (trans_rty env) tys)
+  | ExtArg(x,ty1,ty2) -> ExtArg(tr.var x, trans_rty env ty1, trans_rty env ty2)
+  | List(x,p_len,y,p_i,ty2) -> List(tr.var x,
+                                    tr.term p_len,
+                                    tr.var y,
+                                    tr.term p_i,
                                     trans_rty env ty2)
-  | App _ -> unsupported "Encode_rec_variant.trans_rty: App"
   | Exn(ty1,ty2) -> Exn(trans_rty env ty1, trans_rty env ty2)
   | Variant _ -> unsupported "Encode_rec_variant.trans_rty: Variant"
   | Record _ -> unsupported "Encode_rec_variant.trans_rty: Record"
 
-let trans_rid = abst_recdata.tr2_var
+let trans_rid = abst_recdata.var
 
 let trans_env env (x, ty) =
   trans_rid env x,
@@ -543,6 +565,6 @@ let trans_env env (x, ty) =
 let trans p =
   let env = gather_env @@ Problem.term p in
   let p = Problem.map ~tr_env:(trans_env env) trans_term p in
-  let t = Problem.(p.term) in
+  let t = p.Problem.term in
   Type_check.check t ~ty:t.typ;
   p

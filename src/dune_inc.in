@@ -1,0 +1,4 @@
+(rule
+ (targets revision.ml)
+ @REV_DEPS@
+ (action  (run sh make_rev @GIT@)))

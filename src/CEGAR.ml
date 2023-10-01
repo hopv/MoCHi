@@ -4,7 +4,7 @@ open CEGAR_syntax
 open CEGAR_type
 open CEGAR_util
 
-module MC = ModelCheck
+module MC = Model_check
 
 module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
 
@@ -19,23 +19,6 @@ let pre () =
 let post () =
   incr Flag.Log.cegar_loop;
   Fpat.Global.cegar_iterations := !Flag.Log.cegar_loop
-
-let print_non_CPS_abst abst prog =
-  if !Flag.Mode.just_print_non_CPS_abst then
-    let result =
-      try
-        Some (MC.check abst prog MC.Other)
-      with _ -> None
-    in
-    let s =
-      match result with
-      | None -> "Unknown"
-      | Some (MC.Safe _) -> "Safe"
-      | Some (MC.Unsafe _) -> "Unsafe"
-    in
-    Format.eprintf "@.ABST:@.%a@." CEGAR_print.prog abst;
-    Format.eprintf "RESULT: %s@." s;
-    exit 0
 
 let improve_precision () =
   match () with
@@ -71,21 +54,24 @@ let rec loop ?preprocessed prog0 is_cp ces =
   in
   Verbose.printf "Program with abstraction types (CEGAR-cycle %d)::@.%a@." !Flag.Log.cegar_loop pr prog;
   if !Flag.Print.abst_typ
-  then Format.printf "Abstraction types (CEGAR-cycle %d)::@.%a@." !Flag.Log.cegar_loop CEGAR_print.env prog.env;
+  then Format.fprintf !Flag.Print.target "Abstraction types (CEGAR-cycle %d)::@.%a@." !Flag.Log.cegar_loop CEGAR_print.env prog.env;
   let labeled,preprocessed,abst = CEGAR_abst.abstract prog.info.inlined ?preprocessed prog in
-  print_non_CPS_abst abst prog;
   let spec =
-    match prog.info.CEGAR_syntax.fairness with
-    | Some x -> MC.Fairness x
-    | None -> MC.Other in
-  let result = MC.check abst prog spec in
-  match result, !Flag.mode with
-  | MC.Safe env, _ ->
+    match !Flag.mode, prog.info.CEGAR_syntax.fairness with
+    | FairNonTermination, Some x -> MC.FairNonTermination x
+    | FairNonTermination, None -> assert false
+    | NonTermination, _ -> NonTermination
+    | _ -> Safety
+  in
+  match MC.check abst prog spec with
+  | RSafety (SSafe env)
+  | RNonTermination (NTSafe env)
+  | RFairNonTermination (FNTSafe env) ->
       if !!Flag.Debug.print_ref_typ then
         begin
-          Format.printf "Intersection types:@.";
-          List.iter (fun (f,typ) -> Format.printf "  %s: %a@." f Inter_type.print typ) env;
-          Format.printf "@."
+          Format.fprintf !Flag.Print.target "Intersection types:@.";
+          List.iter (fun (f,typ) -> Format.fprintf !Flag.Print.target "  %s: %a@." f Inter_type.print typ) env;
+          Format.fprintf !Flag.Print.target "@."
         end;
       let env' =
         let aux (x,ityp) =
@@ -93,26 +79,26 @@ let rec loop ?preprocessed prog0 is_cp ces =
             Some (x, Type_trans.ref_of_inter (List.assoc x prog.env) ityp)
           with Not_found -> None
         in
-        if !Flag.Print.certificate && Flag.ModelCheck.(!mc <> TRecS) then
-          match Ref.tmp_set Flag.ModelCheck.mc Flag.ModelCheck.TRecS (fun () -> MC.check abst prog spec) with
-          | MC.Safe env -> List.filter_map aux env
+        if !Flag.Print.certificate && !Flag.mode <> NonTermination && !Flag.mode <> FairNonTermination then
+          match MC.use TRecS; MC.check abst prog spec with
+          | RSafety (SSafe env) -> List.filter_map aux env
           | _ -> assert false
         else
           List.filter_map aux env
       in
       if !!Flag.Debug.print_ref_typ then
         begin
-          Format.printf "Refinement types:@.";
-          List.iter (fun (f,typ) -> Format.printf "  %s: %a@." f CEGAR_ref_type.print typ) env';
-          Format.printf "@."
+          Format.fprintf !Flag.Print.target "Refinement types:@.";
+          List.iter (fun (f,typ) -> Format.fprintf !Flag.Print.target "  %s: %a@." f CEGAR_ref_type.print typ) env';
+          Format.fprintf !Flag.Print.target "@."
         end;
       post ();
       prog, Safe env'
-  | MC.Unsafe (MC.CENonTerm ce_tree), Flag.NonTermination ->
+  | RNonTermination (NTUnsafe ce_tree) ->
       let prog' = CEGAR_non_term.cegar prog0 labeled is_cp ce_tree prog in
       post ();
       loop ~preprocessed prog' is_cp ((MC.CENonTerm ce_tree)::ces)
-  | MC.Unsafe (MC.CEFairNonTerm ce_rules), Flag.FairNonTermination ->
+  | RFairNonTermination (FNTUnsafe ce_rules) ->
       begin
         let prog' = CEGAR_fair_non_term.cegar prog0 labeled is_cp ce_rules prog in
         post ();
@@ -133,19 +119,18 @@ let rec loop ?preprocessed prog0 is_cp ces =
         else
           loop ~preprocessed prog' is_cp ((MC.CEFairNonTerm ce_rules)::ces)
       end
-  | MC.Unsafe ce, _ ->
-      let ce_orig =
-        match ce with
-        | MC.CESafety ce -> ce
-        | _ -> assert false
-      in
+  | RSafety (SUnsafe ce) ->
+      let ce_orig = ce in
       if !Flag.Print.eval_abst then CEGAR_trans.eval_abst_cbn prog labeled abst ce_orig;
       let ce' = CEGAR_trans.trans_ce labeled prog ce_orig None in
       let same_counterexample =
-        match ces with
-        | [] -> false
-        | MC.CESafety ce_pre :: _ -> ce' = CEGAR_trans.trans_ce labeled prog ce_pre None
-        | _ -> assert false
+        if !Flag.Debug.input_cex then
+          false
+        else
+          match ces with
+          | [] -> false
+          | MC.CESafety ce_pre :: _ -> ce' = CEGAR_trans.trans_ce labeled prog ce_pre None
+          | _ -> assert false
       in
       if !Flag.Print.progress then Feasibility.print_ce_reduction ce' prog;
       if same_counterexample then
@@ -156,36 +141,39 @@ let rec loop ?preprocessed prog0 is_cp ces =
           post ();
           raise NoProgress
       else
-        begin
-          match Feasibility.check ce' prog, !Flag.mode with
-          | Feasibility.Feasible _sol, Flag.Termination ->
-              (* termination analysis *)
-              Refine.refine_rank_fun ce' [] prog0;
-              assert false
-          | Feasibility.Feasible _sol, Flag.FairTermination ->
-              Refine.refine_rank_fun ce' [] prog0;
-              assert false
-          | Feasibility.Feasible sol, _ ->
-              prog, Unsafe(sol, ce)
-          | Feasibility.FeasibleNonTerm _, _ ->
-              assert false
-          | Feasibility.Infeasible prefix, _ ->
-              let ces' = ce::ces in
-              let inlined_functions = inlined_functions prog0 in
-              let aux ce =
-                match ce with
-                | MC.CESafety ce' -> CEGAR_trans.trans_ce labeled prog ce' None
-                | _ -> assert false
+        match Feasibility.check ce' prog, !Flag.mode with
+        | Feasibility.Feasible _sol, Flag.Termination ->
+            (* termination analysis *)
+            Refine.refine_rank_fun ce' [] prog0;
+            assert false
+        | Feasibility.Feasible _sol, Flag.FairTermination ->
+            Refine.refine_rank_fun ce' [] prog0;
+            assert false
+        | Feasibility.Feasible sol, _ ->
+            prog, Unsafe(sol, CESafety ce)
+        | Feasibility.FeasibleNonTerm _, _ ->
+            assert false
+        | Feasibility.Infeasible prefix, _ ->
+            let ces' = MC.CESafety ce::ces in
+            let inlined_functions = inlined_functions prog0 in
+            let aux ce =
+              match ce with
+              | MC.CESafety ce' -> CEGAR_trans.trans_ce labeled prog ce' None
+              | _ -> assert false
+            in
+            let _,prog' =
+              let ces'' =
+                if !Flag.Debug.input_cex then
+                  [ce']
+                else
+                  List.map aux ces'
               in
-              let _,prog' =
-                let ces'' = List.map aux ces' in
-                let ext_ces = List.map (Fun.const []) ces'' in
-                Refine.refine inlined_functions is_cp prefix ces'' ext_ces prog0
-              in
-              Verbose.printf "Prefix of spurious counterexample::@.%a@.@." CEGAR_print.ce prefix;
-              post ();
-              loop ~preprocessed prog' is_cp ces'
-        end
+              let ext_ces = List.map (Fun.const []) ces'' in
+              Refine.refine inlined_functions is_cp prefix ces'' ext_ces prog0
+            in
+            Verbose.printf "Prefix of spurious counterexample::@.%a@.@." CEGAR_print.ce prefix;
+            post ();
+            loop ~preprocessed prog' is_cp ces'
 
 
 let run prog =

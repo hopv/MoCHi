@@ -38,19 +38,19 @@ let reset_cycle () = cycle_counter := 0
 let rec remove_coeff_defs coeffs t =
   let open Syntax in
   match t.desc with
-  | Local(Decl_let[x, t1], t2) when Id.mem x coeffs ->
+  | Local(Decl_let[x, t1], t2) when Id.List.mem x coeffs ->
       let n = Term_util.int_of_term t1 in
       let sol,t2' = remove_coeff_defs coeffs t2 in
       (x,n)::sol, t2'
   | _ -> [], t
 
-let set_to_coeff exparam t = Trans.map_id (fun x -> if Id.mem x exparam then Id.add_attr Id.Coefficient x else x) t
+let set_to_coeff exparam t = Trans.map_var (fun x -> if Id.List.mem x exparam then Id.add_attr Id.Coefficient x else x) t
 
 let save_counter = ref 0
 let save_to_file t =
   incr save_counter;
   let ext = string_of_int !save_counter ^ ".ml" in
-  let filename = Filename.change_extension !!Flag.Input.main ext in
+  let filename = Filename.change_extension !!Flag.IO.temp ext in
   let cout = open_out filename in
   let fm = Format.formatter_of_out_channel cout in
   Format.fprintf fm "%a@." Print.as_ocaml_typ t;
@@ -67,7 +67,7 @@ let verify_with holed exparam_sol pred =
   let transformed = set_to_coeff exparams transformed in
   let exparam_sol'' =
     exparams
-    |> List.filter_out (Id.mem_assoc -$- exparam_sol)
+    |> List.filter_out (Id.List.mem_assoc -$- exparam_sol)
     |> List.map (Pair.add_right @@ Fun.const 0)
     |> (@) exparam_sol
   in
@@ -75,7 +75,7 @@ let verify_with holed exparam_sol pred =
     transformed
     |> List.fold_right (fun (x,n) -> Term_util.subst x @@ Term_util.make_int n) exparam_sol''
     |> save_to_file;
-  Main_loop.run ~exparam_sol:exparam_sol'' ~orig @@ Problem.safety transformed
+  Main_loop.run ~exparam_sol:exparam_sol'' ~orig (Some (Problem.safety transformed))
 
 let inferCoeffs argumentVariables linear_templates constraints =
   (* reduce to linear constraint solving *)
@@ -128,7 +128,7 @@ let inferCoeffsAndExparams argumentVariables linear_templates constraints =
      let correspondenceExparams =
        List.map (fun (v, t) ->
                  let n = Fpat.IntTerm.int_of t in
-                 (v |> Fpat.Idnt.string_of |> (flip Id.from_string) Type.Ty.int, n))
+                 (v |> Fpat.Idnt.string_of |> (flip Id.of_string) Type_util.Ty.int, n))
                 (List.filter (fun (v, _) -> v |> Fpat.Idnt.is_coeff) correspondenceVars)
      in
      correspondenceExparams

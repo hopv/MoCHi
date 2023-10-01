@@ -1,5 +1,4 @@
-
-type color =
+type t =
   | Default
   | Bright
   | Dim
@@ -25,14 +24,14 @@ type color =
   | BG_White
 
 val init : unit -> unit
-val set : Format.formatter -> color -> unit
+val set : Format.formatter -> t -> unit
 val reset : Format.formatter -> unit
-val wrap : color -> (Format.formatter -> 'a -> unit) -> Format.formatter -> 'a -> unit
+val wrap : t -> (Format.formatter -> 'a -> unit) -> Format.formatter -> 'a -> unit
 
-val fprintf : Format.formatter -> color -> ('a, Format.formatter, unit) format -> 'a
-val printf : color -> ('a, Format.formatter, unit) format -> 'a
+val fprintf : Format.formatter -> t -> ('a, Format.formatter, unit) format -> 'a
+val printf : t -> ('a, Format.formatter, unit) format -> 'a
 (** Partial application does not work correctly *)
-val eprintf : color -> ('a, Format.formatter, unit) format -> 'a
+val eprintf : t -> ('a, Format.formatter, unit) format -> 'a
 (** Partial application does not work correctly *)
 
 val blue : (Format.formatter -> 'a -> unit) -> Format.formatter -> 'a -> unit

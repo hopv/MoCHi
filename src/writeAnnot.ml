@@ -126,9 +126,10 @@ and process_expression env e =
       process_expression env e
   | Pexp_pack(_) ->
       Util.unsupported "Not implemented: writeAnnot"
-  | Pexp_open _ -> Util.unsupported "Not implemented: writeAnnot"
-  | Pexp_coerce (_, _, _) -> Util.unsupported "Not implemented: writeAnnot"
-  | Pexp_extension _ -> Util.unsupported "Not implemented: writeAnnot"
+  | Pexp_open _ -> Util.unsupported "Not implemented: writeAnnot Pexp_open"
+  | Pexp_coerce (_, _, _) -> Util.unsupported "Not implemented: writeAnnot Pexp_coerce"
+  | Pexp_extension _ -> Util.unsupported "Not implemented: writeAnnot Pexp_extension"
+  | Pexp_letexception(_, e) -> process_expression env e
   | _ -> Util.unsupported "Not implemented: writeAnnot"
 
 let process_top_level_phrase env = function

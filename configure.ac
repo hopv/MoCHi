@@ -1,45 +1,10 @@
 AC_INIT(MoCHi,0.1)
 
-AC_PROG_CC
+AC_PATH_TOOL(OCAMLC, ocamlc, [no], [$PATH:$PWD])
+AC_SUBST(OCAMLC)
 
-AC_PROG_OCAML
 if test "$OCAMLC" = "no"; then
-  AC_MSG_ERROR([OCaml compiler not found])
-fi
-
-AC_PROG_FINDLIB
-if test "$OCAMLFIND" = "no"; then
-  AC_MSG_ERROR([ocamlfind not found])
-fi
-
-AC_PROG_OCAMLLEX
-if test "$OCAMLLEX" = "no"; then
-  AC_MSG_ERROR([ocamllex not found])
-fi
-
-AC_PROG_OCAMLYACC
-if test "$OCAMLYACC" = "no"; then
-  AC_MSG_ERROR([ocamlyacc not found])
-fi
-
-AC_CHECK_OCAML_PKG([batteries])
-if test "$OCAML_PKG_batteries" = "no"; then
-  AC_MSG_ERROR([batteries not found])
-fi
-
-AC_CHECK_OCAML_PKG([ppx_deriving])
-if test "$OCAML_PKG_ppx_deriving" = "no"; then
-  AC_MSG_ERROR([ppx_deriving not found])
-fi
-
-AC_CHECK_OCAML_PKG([z3])
-if test "$OCAML_PKG_Z3" = "no"; then
-  AC_MSG_ERROR([Z3 not found])
-fi
-
-AC_CHECK_OCAML_PKG([yojson])
-if test "$OCAML_PKG_yojson" = "no"; then
-  AC_MSG_ERROR([yojson not found])
+  AC_MSG_ERROR([OCaml not found])
 fi
 
 AC_PATH_TOOL(CVC3, cvc3, [no], [$PATH:$PWD])
@@ -76,6 +41,8 @@ AC_SUBST(OMEGA)
 AC_CHECK_PROG(DUNE, dune, dune)
 AC_SUBST(DUNE)
 
+AC_CHECK_PROG(MENHIR, menhir, menhir)
+
 AC_CHECK_PROG(GIT, git, git)
 AC_SUBST(GIT)
 AC_CHECK_FILE([.git], [], [GIT=""])
@@ -86,13 +53,12 @@ fi
 AC_SUBST(REV_DEPS)
 
 OCAML_VER=`$OCAMLC -version`
-AC_SUBST(OCAML_VER)
 OCAML_MAJOR_VER=`$OCAMLC -version | cut -d . -f 1,2`
-AC_SUBST(OCAML_MAJOR_VER)
 SUPPORTED=`ls src/parser_wrapper_*.ml | sed -e 's/.*parser_wrapper_\(.*\)\.ml/\1/'`
 if echo $SUPPORTED | grep -qsv $OCAML_MAJOR_VER; then
   AC_MSG_ERROR([OCaml $OCAML_VER is not supported])
 fi
 
-AC_CONFIG_FILES([Makefile.config src/mconfig.ml src/dune])
+
+AC_CONFIG_FILES([src/mconfig.ml src/dune_inc])
 AC_OUTPUT

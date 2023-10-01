@@ -13,28 +13,41 @@ type mode =
   | Verify_module
 
 let mode = ref Reachability
+let long_name_len = 50
 
 module External = struct
   let omega = ref Mconfig.omega
   let cvc3 = ref Mconfig.cvc3
 end
 
-module Input = struct
+module IO = struct
   let filenames : string list ref = ref []
+  let temp_file : string option ref =
+    match Sys.getenv_opt "KINE" with (* WORKAROUND *)
+    | None -> ref None
+    | Some _ -> ref (Some "")
   let main () = List.hd !filenames
+  let temp () =
+    match !temp_file with
+    | None ->
+        let s = Filename.(temp_file "_MoCHi_" (change_extension (basename !!main) "tmp")) in
+        temp_file := Some s;
+        s
+    | Some "" -> !!main
+    | Some s -> s
   let spec = ref ""
   let make_check s () =
     let ext = "." ^ s in
-    if List.exists (String.ends_with -$- ext) !filenames then
-      begin
-        if List.length !filenames > 1 then unsupported ("Multiple files for *" ^ ext);
-        true
-      end
-    else
-      false
+    List.exists (String.ends_with -$- ext) !filenames
+  let result () = Filename.change_extension !!temp "json"
   let is_cegar = make_check "cegar"
   let is_bin = make_check "bin"
   let is_debug = make_check "debug"
+  let is_smt2 = make_check "smt2"
+  let conf_file_default = "option.conf"
+  let conf_file = ref conf_file_default
+  let ignore_inc = ref false
+  let ignore_lib = ref false
 end
 
 let pp : string option ref = ref None
@@ -58,7 +71,8 @@ module Parallel = struct
 end
 
 module Method = struct
-  let lazy_preprocess = ref true
+  let init_trans = ref true
+  let trans_to_CPS = ref true
   let nondet = ref false (* eager evaluation for branch *)
   let use_nint = ref false
   let use_part_eval = true
@@ -99,6 +113,7 @@ module Method = struct
   let verify_ref_interface = ref false
   let use_elim_may_div = ref false
   let use_set_theory = ref false
+  let chc = ref false
 end
 
 module Abstract = struct
@@ -114,6 +129,7 @@ module Abstract = struct
   let data_to_int_but_exn = ref false
   let exn_to_bool = ref false
   let complex_data_to_int = ref true
+  let menhir = ref true
 end
 
 module Encode = struct
@@ -130,7 +146,7 @@ module Encode = struct
 end
 
 module Print = struct
-  let source = true
+  let target = ref Format.std_formatter
   let cps = true
   let abst = true
   let abst_eager = true
@@ -153,9 +169,10 @@ module Print = struct
   let certificate = ref false
   let assert_loc = ref false
   let id_loc = ref ""
-  let tdata = ref false
   let exit_after_parsing = ref false
   let signature = ref false
+  let exn = ref false
+  let var_id = ref false
 end
 
 module Log = struct
@@ -167,6 +184,7 @@ module Log = struct
     let interpolant = ref 0.
     let parameter_inference = ref 0.
     let hors_quickcheck = ref 0.
+    let before_slice = ref (-1.)
   end
 
   type status = Safe | Unsafe | Terminating | NonTerminating | Unknown of string | Error of string | Other of string
@@ -209,13 +227,6 @@ module Trans = struct
       raise @@ Arg.Bad (Format.sprintf "Invalaid argument of -trans")
 end
 
-(** TODO merge with Method *)
-module Mode = struct
-  let ignore_conf = ref false
-  let init_trans = ref true
-  let just_print_non_CPS_abst = ref false
-  let trans_to_CPS = ref true
-end
 
 module PredAbst = struct
   let use_filter = ref false
@@ -239,23 +250,21 @@ module Refine = struct
   let merge_counterexample = ref false
   let use_multiple_paths = ref false
   let disable_predicate_accumulation = ref false
-  let use_rec_chc_solver = ref Mconfig.hoice_available
+  let use_rec_chc_solver = ref (Option.is_some Mconfig.hoice)
   type solver = Hoice | Z3 | Z3_spacer
   let solver = ref Hoice
   let solver_timelimit = ref 5 (* seconds *)
   let hoice = ref Mconfig.hoice
   let z3 = ref Mconfig.z3
-  let z3_spacer = ref (Mconfig.z3 ^ " fixedpoint.engine=spacer")
+  let z3_spacer = ref (Option.map (fun s -> s ^ " fixedpoint.engine=spacer") Mconfig.z3)
 end
 
 module ModelCheck = struct
+  (* execution paths of model checkers *)
   let trecs = ref Mconfig.trecs
   let horsat = ref Mconfig.horsat
   let horsat2 = ref Mconfig.horsat2
   let horsatp = ref Mconfig.horsatp
-
-  type model_checker = TRecS | HorSat | HorSat2 | HorSatP
-  let mc = ref (if Mconfig.horsat2_available then HorSat2 else if Mconfig.horsat_available then HorSat else TRecS)
 
   let church_encode = ref false
   let beta_reduce = false
@@ -265,9 +274,10 @@ end
 
 module PrettyPrinter = struct
   let () = Format.set_margin 120
-  let color = ref false
+  let () = Format.set_max_indent 119
+  let color = ref true
   let color_always = ref false
-  let write_annot = ref true
+  let write_annot = ref false
   let web = ref false
 end
 
@@ -314,6 +324,10 @@ module Experiment = struct
     let num = ref 5
     let cex_length_history : int list ref = ref []
   end
+  module Slice = struct
+    let alpha = ref (-1.0)
+    let max_hop = ref 0
+  end
 end
 
 (* Assume deterministic strategy *)
@@ -355,13 +369,25 @@ module EvalStrategy = struct
     !r
 end
 
+module Preprocess = struct
+  let stop_after = ref ""
+  let check_after = ref ""
+  let check_flag = ref true
+  let save_preprocess = ref false
+  let restart_preprocess = ref false
+  let reduce_memory = ref false (* Forget the history of preprocess and types in AFV; disable some features *)
+  let lazy_preprocess = ref true
+end
+
 module Debug = struct
   let check_fun_arg_typ = false
-  let check_typ = true
+  let check_typ = false
+  let check_tmodule = ref false
   let debuggable_modules : string list ref = ref []
   let debug_module : string list ref = ref []
   let abst = ref false
-  let stop_after = ref ""
+  let input_cex = ref false
+  let minimize = ref false
 
   let print_ref_typ () = List.mem "Ref_type" !debug_module
   let make_check s =
@@ -376,9 +402,10 @@ module Debug = struct
     let modules = String.split_on_string ~by:"," mods in
     let check m =
       if not @@ List.mem m !debuggable_modules then
-        (Format.printf "Module \"%s\" is not registered for debug@." m;
-         exit 1)
+        failwith {|Module "%s" is not registered for debug@.|} m
     in
     List.iter check modules;
     debug_module := modules @ !debug_module
+  let print f =
+    if !debug_module <> [] then Format.printf f else Format.iprintf f
 end

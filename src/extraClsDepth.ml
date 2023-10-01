@@ -1,6 +1,7 @@
-open Syntax
-open Term_util
 open Type
+open Syntax
+open Type_util
+open Term_util
 
 (* h -> h_DEPTH *)
 let makeDepthVar id = make_var (Id.add_name_after "_DEPTH" id)
@@ -42,12 +43,12 @@ let maxDepthOf depthList =
     | constDepthList, indefiniteDepthList -> dynamicMaximum ((maxConstDepth constDepthList) :: indefiniteDepthList)
 
 let incrementDepth = function
-  | {desc = Const (Int n)} -> {desc = Const (Int (n+1)); typ = Ty.int; attr=[]}
-  | e -> make_add e (make_int 1)
+  | {desc = Const (Int n)} -> make_int (n+1)
+  | e -> Term.(e + int 1)
 
 let rec closureDepth varToDepth expr =
   match expr.desc with
-    | Var v when is_fun_typ (Id.typ v) ->
+    | Var (LId v) when is_fun_typ (Id.typ v) ->
       begin
 	try
 	  List.assoc (Id.to_string v) varToDepth
@@ -56,7 +57,7 @@ let rec closureDepth varToDepth expr =
 	  (raise Not_found)
       end
     | Const _
-    | Var _ -> make_int 0
+    | Var (LId _) -> make_int 0
     | Fun _ -> assert false (* ??? *)
     | App (f, args) ->
       dynamicGreaterThan (closureDepth varToDepth f) (incrementDepth (maxDepthOf (List.map (closureDepth varToDepth) args)))
@@ -76,76 +77,78 @@ let rec transType = function
 
 let rec insertClsDepth varToDepth expr =
   match expr.desc with
-    | Const _ -> expr
-    | Var v ->
+  | Const _ -> expr
+  | Var (LId v) ->
       let typ = transType v.Id.typ in
-      {desc = Var {v with Id.typ = typ}; typ = typ; attr=[]}
-    | Fun _ -> assert false (* ??? *)
-    | App (f, args) ->
+      let v = Id.set_typ v typ in
+      Term.var v
+  | Var _ -> assert false
+  | Fun _ -> assert false (* ??? *)
+  | App (f, args) ->
       let insertToArgs = function
 	| t when is_base_typ t.typ -> [insertClsDepth varToDepth t]
 	| t -> [closureDepth varToDepth t; insertClsDepth varToDepth t]
       in
-      { expr with
-	desc = App (insertClsDepth varToDepth f, BRA_util.concat_map insertToArgs args)}
-    | If (predicate, thenClause, elseClause) ->
-      { expr with
-	desc = If ((insertClsDepth varToDepth predicate),
-		   (insertClsDepth varToDepth thenClause),
-		   (insertClsDepth varToDepth elseClause))}
-    | Local(Decl_let bindings, e) ->
+      let desc = App (insertClsDepth varToDepth f, BRA_util.concat_map insertToArgs args) in
+      make desc expr.typ
+  | If (predicate, thenClause, elseClause) ->
+      let desc = If ((insertClsDepth varToDepth predicate),
+		     (insertClsDepth varToDepth thenClause),
+		     (insertClsDepth varToDepth elseClause)) in
+      make desc expr.typ
+  | Local(Decl_let bindings, e) ->
       let makeBaseEnv varToDepth = function
 	| (x, _body) when is_base_typ (Id.typ x) -> varToDepth
 	| (x, body) when not @@ is_fun body && is_fun_typ (Id.typ x) ->
-	  let x_depthId = Id.new_var ~name:((Id.name x) ^ "_DEPTH") Ty.int in
-	  let x_depth = make_var x_depthId in
-	  (Id.to_string x, x_depth)::varToDepth
+	    let x_depthId = Id.new_var ~name:((Id.name x) ^ "_DEPTH") Ty.int in
+	    let x_depth = make_var x_depthId in
+	    (Id.to_string x, x_depth)::varToDepth
 	| (x, _body) -> (Id.to_string x, make_int 0)::varToDepth
       in
       let insertClsDepthBinding varToDepth (varToDepth', bindings') = function
 	| (x, body) when is_base_typ (Id.typ x) ->
-	  (varToDepth', (x, insertClsDepth varToDepth body)::bindings')
+	    (varToDepth', (x, insertClsDepth varToDepth body)::bindings')
 	| (x, body) when not @@ is_fun body && is_fun_typ (Id.typ x) ->
-	  let x_depthId =
-	    begin
-	      try
-		BRA_transform.extract_id (List.assoc (Id.to_string x) varToDepth)
-	      with Not_found ->
-	        Id.new_var ~name:((Id.name x) ^ "_DEPTH") Ty.int
-	    end
-	  in
-	  let x_depth = make_var x_depthId in
-	  ( (Id.to_string x, x_depth)::varToDepth'
-	  , (x_depthId, closureDepth varToDepth body)::({x with Id.typ = transType x.Id.typ}, insertClsDepth varToDepth body)::bindings')
+	    let x_depthId =
+	      begin
+	        try
+		  BRA_transform.extract_id (List.assoc (Id.to_string x) varToDepth)
+	        with Not_found ->
+	          Id.new_var ~name:((Id.name x) ^ "_DEPTH") Ty.int
+	      end
+	    in
+	    let x_depth = make_var x_depthId in
+	    ( (Id.to_string x, x_depth)::varToDepth'
+	    , (x_depthId, closureDepth varToDepth body)::({x with Id.typ = transType x.Id.typ}, insertClsDepth varToDepth body)::bindings')
 	| (x, body) ->
-          let args,body = decomp_funs body in
-	  let insertToArgs (vtd, ags) = function
-	    | t when is_base_typ (Id.typ t) -> (vtd, ags@[t])
-	    | t when is_fun_typ (Id.typ t) ->
-	      let t_depthId = Id.new_var ~name:((Id.name t) ^ "_DEPTH") Ty.int in
-	      ((Id.to_string t, make_var t_depthId)::vtd, ags@[t_depthId; {t with Id.typ = transType t.Id.typ}])
-	    | _ -> assert false
-	  in
-	  let (varToDepth, args) =
-	    List.fold_left
-	      insertToArgs
-	      (varToDepth, [])
-	      args
-	  in
-	  ((Id.to_string x, make_int 0)::varToDepth', ({x with Id.typ = transType x.Id.typ}, make_funs args @@ insertClsDepth varToDepth body)::bindings')
+            let args,body = decomp_funs body in
+	    let insertToArgs (vtd, ags) = function
+	      | t when is_base_typ (Id.typ t) -> (vtd, ags@[t])
+	      | t when is_fun_typ (Id.typ t) ->
+	          let t_depthId = Id.new_var ~name:((Id.name t) ^ "_DEPTH") Ty.int in
+	          ((Id.to_string t, make_var t_depthId)::vtd, ags@[t_depthId; {t with Id.typ = transType t.Id.typ}])
+	      | _ -> assert false
+	    in
+	    let (varToDepth, args) =
+	      List.fold_left
+	        insertToArgs
+	        (varToDepth, [])
+	        args
+	    in
+	    ((Id.to_string x, make_int 0)::varToDepth', ({x with Id.typ = transType x.Id.typ}, make_funs args @@ insertClsDepth varToDepth body)::bindings')
       in
       let varToDepth' = List.fold_left makeBaseEnv varToDepth bindings in
       let (varToDepth, bindings) =
 	List.fold_left (insertClsDepthBinding varToDepth') (varToDepth, []) bindings
       in
-      { expr with
-	desc = Local(Decl_let bindings, insertClsDepth varToDepth e)}
-    | BinOp (op, expr1, expr2) ->
-      { expr with
-	desc = BinOp (op, insertClsDepth varToDepth expr1, insertClsDepth varToDepth expr2)}
-    | Not e ->
-      { expr with
-	desc = Not (insertClsDepth varToDepth e)}
-    | _ -> assert false (* unimplemented *)
+      let desc = Local(Decl_let bindings, insertClsDepth varToDepth e) in
+      make desc expr.typ
+  | BinOp (op, expr1, expr2) ->
+      let desc = BinOp (op, insertClsDepth varToDepth expr1, insertClsDepth varToDepth expr2) in
+      make desc expr.typ
+  | Not e ->
+      let desc = Not (insertClsDepth varToDepth e) in
+      make desc expr.typ
+  | _ -> assert false (* unimplemented *)
 
 let addExtraClsDepth = insertClsDepth []

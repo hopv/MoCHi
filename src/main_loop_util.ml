@@ -5,7 +5,7 @@ type return =
      stats : stats option;
      make_get_rtyp : (CEGAR_syntax.var -> CEGAR_ref_type.t) -> Syntax.id -> Ref_type.t;
      set_main: Problem.t option;
-     main: Syntax.id option;
+     main: Syntax.lid option;
      info: Problem.info}
 
 and stats =
@@ -32,10 +32,10 @@ let result_of_json json =
   let result =
     match json |> member "result" |> to_string with
     | "Safe" -> CEGAR.Safe []
-    | "Unsafe" when !Flag.Abstract.used <> [] -> CEGAR.Unknown (Format.asprintf "because of abstraction options %a" Print.(list string) !Flag.Abstract.used)
-    | "Unsafe" -> CEGAR.Unsafe([], ModelCheck.CESafety [])
+    | "Unsafe" when !Flag.Abstract.used <> [] -> CEGAR.Unknown (Format.asprintf "because of abstractions %a" Print.(list string) !Flag.Abstract.used)
+    | "Unsafe" -> CEGAR.Unsafe([], Model_check.CESafety [])
     | r when !Flag.Parallel.continue -> CEGAR.Unknown r
-    | r -> failwith r
+    | r -> failwith "%s" r
   in
   let cycles = json |> member "cycles" |> to_int in
   let total = json |> member "total" |> to_float in

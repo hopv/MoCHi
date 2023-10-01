@@ -52,7 +52,7 @@ let binop_of_atom a =
   | "*" -> ( * )
   | "div" -> ( / )
   | "mod" -> (mod)
-  | _ -> unsupported ("binop_of_atom "^a)
+  | _ -> unsupported "binop_of_atom %s" a
 
 let rec term_of_sexp s =
   let open Sexp in
@@ -71,6 +71,7 @@ let rec term_of_sexp s =
       U.subst_map defs' @@ term_of_sexp s'
   | S [A a; s1; s2] when a.[0] <> '|' -> binop_of_atom a (term_of_sexp s1) (term_of_sexp s2)
   | S (A a :: ss) when a.[0] = '|' -> S.make_app (term_of_atom a) @@ List.map term_of_sexp ss
+  | S (A "!" :: s' :: _) -> term_of_sexp s'
   | _ ->
       Format.eprintf "%a@." print s;
       unsupported "Smtlib2_interface.term_of_sexp"
@@ -86,23 +87,22 @@ let parse_model str =
   let s = str in
   Debug.printf "[parse_model] INPUT: @[%a@." (List.print Sexp.print) s;
   let open Sexp in
-  match s with
-  | [A "unsat"; _] -> fatal "Recursive HCCS unsatisfiable?"
-  | [A "sat"; S (A "model" :: sol)] ->
-      let aux s =
-        match s with
-        | S (A "define-fun" :: A id :: S args :: A _ty :: body :: []) ->
-            let args =
-              let aux s =
-                match s with
-                | S (A x::A ty::[]) -> x, type_of_atom ty
-                | _ -> !!unsupported
-              in
-              List.map aux args
-            in
-            let body = term_of_sexp body in
-            id, (args, body)
-        | _ -> !!unsupported
-      in
-      List.map aux sol
-  | _ -> !!unsupported
+  let sol =
+    match s with
+    | [A "unsat"; _] -> failwith "Recursive HCCS unsatisfiable?"
+    | [A "sat"; S (A "model" :: sol)]
+    | [A "sat"; S sol] -> sol
+    | _ -> !!unsupported
+  in
+  sol
+  |> List.map (function
+         | S (A "define-fun" :: A id :: S args :: A _ty :: body :: []) ->
+             let args =
+               args
+               |> List.map (function
+                      | S (A x::A ty::[]) -> x, type_of_atom ty
+                      | _ -> !!unsupported)
+             in
+             let body = term_of_sexp body in
+             id, (args, body)
+         | _ -> !!unsupported)

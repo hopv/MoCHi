@@ -48,7 +48,7 @@ let rec coerce env cond pts typ1 typ2 t =
   | _ -> Format.eprintf "COERCE: %a, %a@." CEGAR_print.typ typ1 CEGAR_print.typ typ2; assert false
 
 let coerce env cond pts typ1 typ2 =
-  if false then Format.printf "COERCE: %a  ===>  %a@." CEGAR_print.typ typ1 CEGAR_print.typ typ2;
+  if false then Format.fprintf !Flag.Print.target "COERCE: %a  ===>  %a@." CEGAR_print.typ typ1 CEGAR_print.typ typ2;
   coerce env cond pts typ1 typ2
 
 
@@ -129,7 +129,7 @@ let abstract _force ?preprocessed prog =
     Time.measure_and_add
       Flag.Log.Time.abstraction
       (fun () ->
-         if !Flag.Print.progress then Color.printf Color.Green "(%d-1)[%.3f] Abstracting ... @?" !Flag.Log.cegar_loop !!Time.get;
+         Verbose.printf ~color:Green "(%d-1)[%.3f] Abstracting ... @?" !Flag.Log.cegar_loop !!Time.get;
          set_status @@ Flag.Log.Other (Format.sprintf "(%d-1) Abstraction" !Flag.Log.cegar_loop);
          let labeled,preprocessed,abst =
            if List.mem ACPS prog.info.attr then
@@ -139,7 +139,7 @@ let abstract _force ?preprocessed prog =
              labeled, prog, abst
          in
          Debug.printf "Abstracted program::@\n%a@." CEGAR_print.prog abst;
-         if !Flag.Print.progress then Color.printf Color.Green "DONE!@.@.";
+         Verbose.printf ~color:Green "DONE!@.@.";
          labeled, preprocessed, abst) ()
   in
   let abst',_,_ = CEGAR_trans.rename_prog abst in
