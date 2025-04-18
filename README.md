@@ -11,15 +11,19 @@ How to install
 How to build
 ============
 
- Install the required tools/libraries listed below,
- and run "dune build", which generates "src/mochi.exe".
+The following commands produce the executable `src/mochi.exe`:
+```
+$ dune build mochi.opam
+$ opam install --deps-only .
+$ dune build --release
+```
 
 
 What do you need?
 =================
 
 - OCaml >=4.08.0 & <5.2.0
-    - OCaml 4.13 and 4.14 are recommended
+    - OCaml 4.14 is recommended
 - opam >=2.1
 - Git
 - Tools/Libraries available via opam

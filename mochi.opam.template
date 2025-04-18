@@ -1,0 +1,5 @@
+pin-depends: [
+  ["atp.mochi-dev" "git+https://github.com/ryosu-sato/atp.git"]
+  ["csisat.mochi-dev" "git+https://github.com/ryosu-sato/csisat.git"]
+  ["fpat.v20241224" "git+https://github.com/ryosu-sato/fpat.git"]
+]
