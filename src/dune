@@ -1,13 +1,44 @@
 (executable
  (name mochi)
  (public_name mochi)
- (libraries fpat str unix batteries compiler-libs.common z3 yojson smtlib-utils ocamlgraph)
+ (libraries
+  fpat
+  str
+  unix
+  batteries
+  compiler-libs.common
+  z3
+  yojson
+  smtlib-utils
+  ocamlgraph
+  dune-build-info
+  bos
+  fmt
+  re2
+  tsort)
  (modules_without_implementation fair_termination_type)
- (flags (:standard -w -21-32-9-52-57-58 -warn-error -a))
- (preprocess (pps ppx_deriving.show ppx_mochi))
- (promote))
+ (flags
+  (:standard -w -21-32-9-52-57-58 -warn-error -a))
+ (preprocess
+  (pps ppx_deriving.show ppx_mochi))
+ (promote)
+ (instrumentation
+  (backend landmarks --auto)))
 
-(ocamllex (modules trecs_lexer spec_lexer horSat_lexer horSat2_lexer CEGAR_lexer HORS_lexer))
-(menhir (modules trecs_parser spec_parser horSat_parser horSat2_parser CEGAR_parser HORS_parser))
+(ocamllex
+ (modules
+  trecs_lexer
+  spec_lexer
+  horSat_lexer
+  horSat2_lexer
+  CEGAR_lexer
+  HORS_lexer))
 
-(include dune_inc)
+(menhir
+ (modules
+  trecs_parser
+  spec_parser
+  horSat_parser
+  horSat2_parser
+  CEGAR_parser
+  HORS_parser))

@@ -4,8 +4,11 @@ open Spec_parser
 
 let space = [' ' '\t' '\r']
 let digit = ['0'-'9']
-let lower = ['a'-'z' '_' '\'']
+let lower = ['a'-'z' '_']
+let lower' = ['a'-'z' '_' '\'']
 let upper = ['A'-'Z']
+let uident = upper(digit|lower'|upper)*
+let lident = lower(digit|lower'|upper)*
 
 rule token = parse
 | space+      { token lexbuf }
@@ -44,6 +47,7 @@ rule token = parse
 | ':'         { COLON }
 | '|'         { BAR }
 | ','         { COMMA }
+| '\''        { PRIME }
 | "assert"    { ASSERT }
 | "type"      { TYPE }
 | "val"       { VAL }
@@ -59,13 +63,13 @@ rule token = parse
 | "\\/"       { UNION }
 | "_"         { UNDER_SCORE }
 | digit+ as n { INT(int_of_string n) }
-| (upper(digit|lower|upper)*'.')*lower(digit|lower|upper)* as x
+| (uident '.')* lident as x
               { LIDENT x }
-| (upper(digit|lower|upper)*'.')*upper(digit|lower|upper)* as x
+| (uident '.')* uident as x
               { UIDENT x }
 | "#randint_"digit+ as x
               { LIDENT x }
-| (lower|upper)(digit|lower|upper)* as x
+| (lower|upper)(digit|lower|upper)* as x (* Unreachabel? *)
               { EVENT x }
 | "@"         { AT }
 | '"' ([^'"''\\'] | '\\'['\x00'-'\xff'])+ '"'

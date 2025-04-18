@@ -1,4 +1,3 @@
-
 (** Abstraction for data types *)
 
 val trans : Problem.t -> Problem.t

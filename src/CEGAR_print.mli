@@ -1,4 +1,3 @@
-
 (** Pretty printer for CEGAR language *)
 
 val const : Format.formatter -> CEGAR_syntax.const -> unit
@@ -14,7 +13,5 @@ val attr : Format.formatter -> CEGAR_syntax.attr list -> unit
 val prog : Format.formatter -> CEGAR_syntax.prog -> unit
 val prog_typ : Format.formatter -> CEGAR_syntax.prog -> unit
 val prog_ML : Format.formatter -> CEGAR_syntax.prog -> unit
-
 val string_of_const : CEGAR_syntax.const -> string
-
 val env_diff : Format.formatter -> CEGAR_syntax.env -> unit

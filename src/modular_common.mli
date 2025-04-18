@@ -1,4 +1,3 @@
-
 type program = {
   fun_typ_env : Ref_type.env;
   fun_typ_neg_env : Ref_type.neg_env;
@@ -16,7 +15,6 @@ val print_def_env : Format.formatter -> (Syntax.id * Syntax.term) list -> unit
 val print_prog : Format.formatter -> program -> unit
 val print_ce : Format.formatter -> ce -> unit
 val print_ce_set : Format.formatter -> ce_set -> unit
-
 val compose_id : ?nid:int -> ?arg:int -> Syntax.id -> Syntax.id
 val decomp_id : Syntax.id -> string * int option * int list
 val same_top_fun : Syntax.id -> Syntax.id -> bool

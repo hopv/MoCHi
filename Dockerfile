@@ -5,5 +5,5 @@ WORKDIR /home/opam
 COPY --chown=opam:opam . .
 
 RUN eval $(opam env) && \
-    ./build && \
+    dune build && \
     ./src/mochi.exe -v

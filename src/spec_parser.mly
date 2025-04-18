@@ -4,46 +4,53 @@ open Type
 open Syntax
 open Type_util
 open Term_util
+open Spec_syntax
 
 module RT = Ref_type
-
-let print_error_information () =
-  try
-    let st = Parsing.symbol_start_pos () in
-    let en = Parsing.symbol_end_pos () in
-    Format.eprintf "%s, line %d, characters %d-%d\n"
-                   st.Lexing.pos_fname
-                   st.Lexing.pos_lnum
-                   (st.Lexing.pos_cnum - st.Lexing.pos_bol)
-                   (en.Lexing.pos_cnum - en.Lexing.pos_bol)
-  with _ -> ()
-
-let parse_error _ = print_error_information ()
 
 let make_tmp_id s = Id.make s typ_unknown
 let make_id_typ s typ = Id.make s typ
 let make_self_id typ = Id.new_var ~name:"_" typ
 let orig_id x = Id.set_id x 0
 
-let ref_base b = Ref_type.Base(b, Id.new_var (TBase(b)), true_term)
-let ref_constr s tys = Ref_type.Constr(s, tys, Id.new_var (TConstr(s,[])), true_term)
+let tvar_counter = ref 0
+let tvar_env : (string * Syntax.term Type.tvar) list ref = ref []
+let reset_tvar_env () =
+  tvar_counter := 0;
+  tvar_env := []
+
+let normalize_ref ty =
+  reset_tvar_env ();
+  RT.map_pred Trans.set_length_typ ty
+
+let ref_var s =
+  let x =
+    List.assoc_opt s !tvar_env
+    |> Option.default_delayed (fun () ->
+           let y = Type.(ValE._TVar @@ new_tvar ()) in
+           tvar_env := (s, y) :: !tvar_env;
+           y)
+  in
+  RT.Var x
+let ref_base b = RT.Base(b, Id.new_var (TBase(b)), true_term)
+let ref_constr s tys = RT.Constr(s, tys, Id.new_var (TConstr(s,[])), true_term)
 let ref_list typ = RT.List(Id.new_var Ty.int, true_term, Id.new_var Ty.int, true_term, typ)
 let ref_fun x ty1 ty2 =
   let ty2' = RT.subst_var (orig_id x) (Id.set_typ x @@ elim_tattr @@ RT.to_simple ty1) ty2 in
   RT.Fun(x, ty1, ty2')
 let ref_tuple xtys =
-  let xtys' = snd @@
-    List.Labels.fold_left ~init:([],[]) xtys ~f:
-      begin fun (map,tuple) (x,rty) ->
+  let xtys' =
+    List.L.fold_left xtys
+      ~init:([],[])
+      ~f:(fun (map,tuple) (x,rty) ->
         let x' = Id.set_typ x (RT.to_simple rty) in
         let rty' = RT.subst_map map rty in
         List.snoc map (orig_id x, make_var x'),
-        List.snoc tuple (x', rty')
-      end
-  in RT.Tuple(xtys')
-
-let normalize_ref ty =
-  RT.map_pred Trans.set_length_typ ty
+        (x', rty') :: tuple)
+    |> snd
+    |> List.rev
+  in
+  RT.Tuple(xtys')
 
 let make_pat p =
   make_pattern p typ_unknown
@@ -55,7 +62,6 @@ let var_of_ref_type ty =
   match ty with
   | RT.Base(_,y,_) -> y
   | _ -> Id.new_var @@ RT.to_simple ty
-
 %}
 
 %token <string> LIDENT /* start with lowercase letter */
@@ -109,6 +115,7 @@ let var_of_ref_type ty =
 %token MATCH
 %token WITH
 %token UNDER_SCORE
+%token PRIME
 %token EOF
 
 /* priority : low -> high */
@@ -123,7 +130,7 @@ let var_of_ref_type ty =
 
 
 %start spec
-%type <Spec.t> spec
+%type <t> spec
 
 %%
 
@@ -199,25 +206,25 @@ spec:
   sp=spec_list EOF { sp }
 
 spec_list:
-  { Spec.init }
+  { init }
 | s=assert_ref_type sp=spec_list
-  { {sp with Spec.assertion = s::sp.Spec.assertion} }
+  { {sp with assertion = s::sp.assertion} }
 | s=ref_type sp=spec_list
-  { {sp with Spec.ref_env = s::sp.Spec.ref_env} }
+  { {sp with ref_env = s::sp.ref_env} }
 | s=ext_ref_type sp=spec_list
-  { {sp with Spec.ext_ref_env = s::sp.Spec.ext_ref_env} }
+  { {sp with ext_ref_env = s::sp.ext_ref_env} }
 | s=typedef sp=spec_list
-  { {sp with Spec.abst_env = s::sp.Spec.abst_env} }
+  { {sp with abst_env = s::sp.abst_env} }
 | s=typedef_cps sp=spec_list
-  { {sp with Spec.abst_cps_env = s::sp.Spec.abst_cps_env} }
+  { {sp with abst_cps_env = s::sp.abst_cps_env} }
 | s=typedef_cegar sp=spec_list
-  { {sp with Spec.abst_cegar_env = s::sp.Spec.abst_cegar_env} }
+  { {sp with abst_cegar_env = s::sp.abst_cegar_env} }
 | s=inline sp=spec_list
-  { {sp with Spec.inlined = s::sp.Spec.inlined} }
+  { {sp with inlined = s::sp.inlined} }
 | s=inlinef sp=spec_list
-  { {sp with Spec.inlined_f = s::sp.Spec.inlined_f} }
+  { {sp with inlined_f = s::sp.inlined_f} }
 | s=fairness sp=spec_list
-  { {sp with Spec.fairness = s::sp.Spec.fairness} }
+  { {sp with fairness = s::sp.fairness} }
 
 assert_ref_type:
 | ASSERT x=id COLON ty=ref_typ
@@ -229,9 +236,9 @@ ref_type:
 
 ext_ref_type:
 | EXTERNAL x=id COLON ty=ref_typ
-  { x, None, normalize_ref ty }
+  { x, (None, normalize_ref ty) }
 | EXTERNAL x=id AT s=STRING COLON ty=ref_typ
-  { x, Some s, normalize_ref ty }
+  { x, (Some s, normalize_ref ty) }
 
 typedef:
 | VAL x=id COLON ty=typ
@@ -307,6 +314,7 @@ ref_constr:
 
 ref_simple:
 | b=ref_base { ref_base b }
+| PRIME x=LIDENT { ref_var x }
 | LBRACE v=id COLON b=ref_base BAR e=full_exp RBRACE
   {
     let x = Id.set_typ v (TBase b) in
@@ -327,7 +335,12 @@ ref_simple:
   }
 | LPAREN ty=ref_typ RPAREN { ty }
 | ty=ref_simple LIST { RT.List(Id.new_var Ty.int, true_term, Id.new_var Ty.int, true_term, ty) }
-/*
+| ty=ref_simple c=ref_constr {
+    let p = Type.LId (constr_of_string c) in
+    let sty = TConstr(p, [RT.to_simple ty]) in
+    RT.Constr(p, [ty], Id.new_var sty, true_term)
+  }
+/*******************************************************************************
 | ty=ref_simple xp=length_ref LIST
   {
     let x, p_len = xp in
@@ -363,7 +376,7 @@ length_ref:
     let x' = Id.new_var ~name:(Id.name x) Ty.int in
     x', subst_var x x' e
   }
-*/
+*******************************************************************************/
 tuple_ref_typ:
 | ty1=ref_simple TIMES ty2=ref_simple
   {
@@ -376,24 +389,24 @@ ref_typ:
 | ty=ref_simple { ty }
 | x=id COLON ty1=ref_simple TIMES ty2=ref_typ
   {
-    let y = Id.new_var (Ref_type.to_simple ty2) in
+    let y = Id.new_var (RT.to_simple ty2) in
     ref_tuple [(x,ty1);(y,ty2)]
   }
 | LPAREN x=id COLON ty1=ref_simple RPAREN TIMES ty2=ref_typ
   {
-    let y = Id.new_var (Ref_type.to_simple ty2) in
+    let y = Id.new_var (RT.to_simple ty2) in
     ref_tuple [(x,ty1);(y,ty2)]
   }
 | tys=tuple_ref_typ
   { RT.Tuple tys }
 | x=id COLON ty1=ref_simple ARROW ty2=ref_typ
   {
-    let x' = Id.set_typ x (Ref_type.to_simple ty1) in
+    let x' = Id.set_typ x (RT.to_simple ty1) in
     ref_fun x' ty1 ty2
   }
 | LPAREN x=id COLON ty1=ref_simple RPAREN ARROW ty2=ref_typ
   {
-    let x' = Id.set_typ x (Ref_type.to_simple ty1) in
+    let x' = Id.set_typ x (RT.to_simple ty1) in
     ref_fun x' ty1 ty2
   }
 | ty1=ref_typ ARROW ty2=ref_typ

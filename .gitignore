@@ -61,6 +61,8 @@ mochi_bin/lib/
 *.sol
 *.json
 *.status
+*.in
+*.hfl
 
 # Other generated files
 gmon.out
@@ -79,9 +81,10 @@ _opam/
 # Directories
 tmp/
 wiki/
+bench/
 benchmark/
 mochi_benchmark/
-mochi_github/
+old/
 
 # Others
 option.conf

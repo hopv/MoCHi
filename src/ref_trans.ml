@@ -4,89 +4,73 @@ open Type_util
 open Syntax
 open Term_util
 
-module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
+module Debug = Debug.Make (struct
+  let check = Flag.Debug.make_check __MODULE__
+end)
 
 let trans = Tr2.make ()
 
 let rec root x bb path_rev =
-  let aux (y,t) =
-    match t with
-    | {desc=Proj(i,{desc=Var z})} when Lid.(x = y) -> Some (z,i)
-    | _ -> None
+  let aux (y, t) =
+    match t with { desc = Proj (i, { desc = Var z }) } when Lid.(x = y) -> Some (z, i) | _ -> None
   in
   try
-    let y,dir = Option.get @@ List.find ((<>) None) @@ List.map aux bb in
-    begin
-      match elim_tattr @@ fst_typ @@ Lid.typ y with
-      | TFun _ -> root y bb (dir::path_rev)
-      | _ -> raise Not_found
-    end
-  with Not_found -> x, List.rev path_rev
+    let y, dir = Option.get @@ List.find (( <> ) None) @@ List.map aux bb in
+    match elim_tattr @@ fst_typ @@ Lid.typ y with
+    | TFun _ -> root y bb (dir :: path_rev)
+    | _ -> raise Not_found
+  with Not_found -> (x, List.rev path_rev)
+
 let root x bb = root x bb []
 
 let rec find_proj i x bb =
   match bb with
   | [] -> None
-  | (y,{desc=Proj(j,{desc=Var z})})::_ when i = j && Lid.(x = z) -> Some y
-  | _::bb' -> find_proj i x bb'
+  | (y, { desc = Proj (j, { desc = Var z }) }) :: _ when i = j && Lid.(x = z) -> Some y
+  | _ :: bb' -> find_proj i x bb'
 
 let rec find_app x bb =
   match bb with
   | [] -> []
-  | (_,{desc=App({desc=Var y},[t])})::bb' when Lid.(x = y) ->
+  | (_, { desc = App ({ desc = Var y }, [ t ]) }) :: bb' when Lid.(x = y) ->
       let args = find_app x bb' in
-      if List.exists (same_term t) args then
-        args
-      else
-        t::args
-  | _::bb' -> find_app x bb'
+      if List.exists (same_term t) args then args else t :: args
+  | _ :: bb' -> find_app x bb'
 
 let decomp_tfun_ttuple typ =
   try
-    let typs =
-      try
-        decomp_ttuple typ
-      with Invalid_argument "decomp_ttuple" -> [typ]
-    in
-    let decomp typ =
-      match typ with
-      | TFun(x,typ') -> x, typ'
-      | _ -> raise Option.No_value
-    in
+    let typs = try decomp_ttuple typ with Invalid_argument "decomp_ttuple" -> [ typ ] in
+    let decomp typ = match typ with TFun (x, typ') -> (x, typ') | _ -> raise Option.No_value in
     Some (List.map decomp typs)
   with Option.No_value -> None
 
 let rec make_tree x bb =
-  if Debug.check() then Color.printf Red "make_tree: %a@." Print.lid_typ x;
-  let children = List.mapi (fun i _ -> find_proj i x bb) @@ Option.get @@ decomp_tfun_ttuple @@ Lid.typ x in
-  if List.for_all Option.is_some children
-  then
+  if Debug.check () then Color.printf Red "make_tree: %a@." Print.lid_typ x;
+  let children =
+    List.mapi (fun i _ -> find_proj i x bb) @@ Option.get @@ decomp_tfun_ttuple @@ Lid.typ x
+  in
+  if List.for_all Option.is_some children then
     Rose_tree.Node ((None, []), List.map (make_tree -$- bb) @@ List.map Option.get children)
-  else
-    if List.for_all Option.is_none children
-    then
-      let typ =
-        try
-          Some (Id.typ @@ fst @@ ValE'._TFun @@ Lid.typ x)
-        with Invalid_argument _ -> None
-      in
-      let args = find_app x bb in
-      Rose_tree.leaf (typ, args)
-    else
-      unsupported "not implemented: make_tree"
+  else if List.for_all Option.is_none children then
+    let typ =
+      try Some (Id.typ @@ fst @@ ValE'._TFun @@ Lid.typ x) with Invalid_argument _ -> None
+    in
+    let args = find_app x bb in
+    Rose_tree.leaf (typ, args)
+  else unsupported "not implemented: make_tree"
 
 let rec make_trees tree =
   match tree with
-  | Rose_tree.Node((None, []), []) -> assert false
-  | Rose_tree.Node((None, _), []) -> assert false
-  | Rose_tree.Node((Some typ, []), []) -> [Rose_tree.leaf (make_none_enc typ)]
-  | Rose_tree.Node((Some _, args), []) -> List.map (fun t -> Rose_tree.leaf (make_some_enc t)) args
+  | Rose_tree.Node ((None, []), []) -> assert false
+  | Rose_tree.Node ((None, _), []) -> assert false
+  | Rose_tree.Node ((Some typ, []), []) -> [ Rose_tree.leaf (make_none_enc typ) ]
+  | Rose_tree.Node ((Some _, args), []) -> List.map (fun t -> Rose_tree.leaf (make_some_enc t)) args
   | Rose_tree.Node (_, ts) ->
       let rec pick xss =
         match xss with
         | [] -> []
-        | [xs] -> List.map List.singleton xs
-        | xs::xss' ->
+        | [ xs ] -> List.map List.singleton xs
+        | xs :: xss' ->
             let yss = pick xss' in
             List.rev_map_flatten (fun x -> List.map (List.cons x) yss) xs
       in
@@ -94,53 +78,44 @@ let rec make_trees tree =
 
 let rec term_of_tree tree =
   match tree with
-  | Rose_tree.Node(t, [])  -> t
-  | Rose_tree.Node(_, ts) -> make_tuple @@ List.map term_of_tree ts
-
+  | Rose_tree.Node (t, []) -> t
+  | Rose_tree.Node (_, ts) -> make_tuple @@ List.map term_of_tree ts
 
 let rec proj_of_path top path t =
   match path with
-    [] when top -> t
+  | [] when top -> t
   | [] -> make_get_val t
-  | i::path' -> proj_of_path false path' @@ make_proj i t
-let proj_of_path path t = proj_of_path true path t
+  | i :: path' -> proj_of_path false path' @@ make_proj i t
 
-let make_some' t =
-  if is_none_enc t
-  then t
-  else make_some_enc t
+let proj_of_path path t = proj_of_path true path t
+let make_some' t = if is_none_enc t then t else make_some_enc t
 
 let rec same_arg path_rev t1 t2 =
-  match t1,t2 with
-  | Rose_tree.Node(t1', []), Rose_tree.Node(t2', []) when t1' = t2' -> List.rev path_rev
-  | Rose_tree.Node(_, []), Rose_tree.Node(_, []) -> []
-  | Rose_tree.Node(_, ts1), Rose_tree.Node(_, ts2) ->
-     List.rev_flatten @@ List.mapi2 (fun i -> same_arg @@ i::path_rev) ts1 ts2
+  match (t1, t2) with
+  | Rose_tree.Node (t1', []), Rose_tree.Node (t2', []) when t1' = t2' -> List.rev path_rev
+  | Rose_tree.Node (_, []), Rose_tree.Node (_, []) -> []
+  | Rose_tree.Node (_, ts1), Rose_tree.Node (_, ts2) ->
+      List.rev_flatten @@ List.mapi2 (fun i -> same_arg @@ (i :: path_rev)) ts1 ts2
 
 let same_arg t1 t2 = same_arg [] t1 t2
 
 let inst_var_fun x tt bb t =
   match Lid.typ x with
-  | TFun(y,_) ->
+  | TFun (y, _) ->
       let y' = Id.new_var_id y in
       Debug.printf "x: %a, y': %a@." Lid.print x Id.print y';
-      let r,path = root x bb in
-      if Lid.(x = r)
-      then
+      let r, path = root x bb in
+      if Lid.(x = r) then
         let () = Debug.printf "THIS IS ROOT@." in
-        make_app (make_var_lid x) [t]
+        make_app (make_var_lid x) [ t ]
       else
         let () = Debug.printf "THIS IS NOT ROOT@." in
         let tree = make_tree r bb in
-        let tree' = Rose_tree.update path (Rose_tree.leaf(Some (Id.typ y'), [make_var y'])) tree in
-        let r' =
-          match r with
-          | LId x -> LId (trans.var (tt,bb) x)
-          | _ -> assert false
+        let tree' =
+          Rose_tree.update path (Rose_tree.leaf (Some (Id.typ y'), [ make_var y' ])) tree
         in
-        let pr fm (_,ts) =
-          Format.fprintf fm "[%a]" (print_list Print.term' "; ") ts
-        in
+        let r' = match r with LId x -> LId (trans.var (tt, bb) x) | _ -> assert false in
+        let pr fm (_, ts) = Format.fprintf fm "[%a]" (print_list Print.term' "; ") ts in
         Debug.printf "y': %a@." Id.print y';
         Debug.printf "path: [%a]@." (print_list Format.pp_print_int ";") path;
         Debug.printf "TREE: %a@." (Rose_tree.print pr) tree;
@@ -152,15 +127,16 @@ let inst_var_fun x tt bb t =
         let argss = List.map Rose_tree.flatten trees in
         let args = List.map (List.singleton -| make_tuple) argss in
         let apps = List.map (make_app @@ make_var_lid r') args in
-        let same_arg_apps = (* negligence *)
+        let same_arg_apps =
+          (* negligence *)
           let rec aux i ts acc =
             match ts with
-              [] -> assert false
-            | [_] -> acc
-            | t1::t2::ts ->
+            | [] -> assert false
+            | [ _ ] -> acc
+            | t1 :: t2 :: ts ->
                 let paths = same_arg t1 t2 in
-                let paths' = List.map (fun path -> i,i+1,path) paths in
-                aux (i+1) (t2::ts) (paths' @ acc)
+                let paths' = List.map (fun path -> (i, i + 1, path)) paths in
+                aux (i + 1) (t2 :: ts) (paths' @ acc)
           in
           aux 0 trees []
         in
@@ -168,17 +144,18 @@ let inst_var_fun x tt bb t =
         let t' =
           let t1 = proj_of_path path @@ make_var @@ List.hd xs in
           let t2 =
-            let aux t (i,j,_) =
+            let aux t (i, j, _) =
               let t1 = make_var (List.nth xs i) in
               let t2 = make_var (List.nth xs j) in
               make_assume (make_eq t1 t2) t
             in
             List.fold_left aux t1 same_arg_apps
           in
-          List.fold_left2 (fun t x app -> make_let [x,app] t) t2 xs apps
+          List.fold_left2 (fun t x app -> make_let [ (x, app) ] t) t2 xs apps
         in
         subst y' t t'
-  | _ -> make_app (make_var_lid x) [t] (* negligence *)
+  | _ -> make_app (make_var_lid x) [ t ]
+(* negligence *)
 
 let rec tree_of_typ typ =
   match typ with
@@ -187,17 +164,15 @@ let rec tree_of_typ typ =
 
 let trans_typ ttbb typ =
   match typ with
-  | TTuple _ ->
-      begin
-        match decomp_tfun_ttuple typ with
-        | None -> trans.typ_rec ttbb typ
-        | Some xtyps ->
-            let xtyps' = List.map (fun (x,typ) -> trans.var ttbb x, trans.typ ttbb typ) xtyps in
-            let arg_typs = List.map (fun (x,_) -> opt_typ_enc @@ Id.typ x) xtyps' in
-            let ret_typs = List.map (fun (_,typ) -> opt_typ_enc typ) xtyps' in
-            let name = String.join "" @@ List.map (fun (x,_) -> Id.name x) xtyps' in
-            TFun(Id.new_var ~name @@ make_ttuple arg_typs, make_ttuple ret_typs)
-      end
+  | TTuple _ -> (
+      match decomp_tfun_ttuple typ with
+      | None -> trans.typ_rec ttbb typ
+      | Some xtyps ->
+          let xtyps' = List.map (fun (x, typ) -> (trans.var ttbb x, trans.typ ttbb typ)) xtyps in
+          let arg_typs = List.map (fun (x, _) -> opt_typ_enc @@ Id.typ x) xtyps' in
+          let ret_typs = List.map (fun (_, typ) -> opt_typ_enc typ) xtyps' in
+          let name = String.join "" @@ List.map (fun (x, _) -> Id.name x) xtyps' in
+          TFun (Id.new_var ~name @@ make_ttuple arg_typs, make_ttuple ret_typs))
   | _ -> trans.typ_rec ttbb typ
 
 (*
@@ -206,79 +181,118 @@ let trans_typ ttbb typ =
   |@debug()&> Color.printf Yellow "%a@ ===>@ @[%a@]@.@." print_typ typ print_typ
 *)
 
-let trans_term (tt,bb) t =
+let trans_term (tt, bb) t =
   match t.desc with
-  | Local(Decl_let [x,({desc=App({desc=Var (LId x1)},[t11])} as t1)], t) when is_non_rec [x,t1] ->
-      let x' = trans.var (tt,bb) x in
-      let x1' = trans.var (tt,bb) x1 in
-      let t11' = trans.term (tt,bb) t11 in
-      let bb' = (LId x,t1)::bb in
-      let t' = trans.term (tt,bb') t in
+  | Local (Decl_let [ (x, ({ desc = App ({ desc = Var (LId x1) }, [ t11 ]) } as t1)) ], t)
+    when is_non_rec [ (x, t1) ] ->
+      let x' = trans.var (tt, bb) x in
+      let x1' = trans.var (tt, bb) x1 in
+      let t11' = trans.term (tt, bb) t11 in
+      let bb' = (LId x, t1) :: bb in
+      let t' = trans.term (tt, bb') t in
       let tx = inst_var_fun (LId x1') tt bb' t11' in
-      make_let [x',tx] t'
-  | Local(Decl_let [x,({desc=Tuple[{desc=Var (LId x1)};{desc=Var (LId x2)}]} as t1)], t) when Id.(x1 = x2) && is_non_rec [x,t1] ->
-      let x' =  trans.var (tt,bb) x in
-      let x1' = trans.var (tt,bb) x1 in
-      let bb' = (LId x,t1)::bb in
-      let t' = trans.term (tt,bb') t in
+      make_let [ (x', tx) ] t'
+  | Local
+      ( Decl_let
+          [ (x, ({ desc = Tuple [ { desc = Var (LId x1) }; { desc = Var (LId x2) } ] } as t1)) ],
+        t )
+    when Id.(x1 = x2) && is_non_rec [ (x, t1) ] ->
+      let x' = trans.var (tt, bb) x in
+      let x1' = trans.var (tt, bb) x1 in
+      let bb' = (LId x, t1) :: bb in
+      let t' = trans.term (tt, bb') t in
       let t1' =
-        match trans_typ (tt,bb) @@ Id.typ x with
-        | TFun(y, _) ->
+        match trans_typ (tt, bb) @@ Id.typ x with
+        | TFun (y, _) ->
             let y' = Id.new_var_id y in
             let ty1 = make_fst (make_var y') in
             let ty2 = make_snd (make_var y') in
             let y1 = Id.new_var ~name:(Id.name y ^ "1") ty1.typ in
             let y2 = Id.new_var ~name:(Id.name y ^ "2") ty2.typ in
-            let t1 = make_some_enc @@ make_app (make_var x1') [make_get_val @@ make_var y1] in
-            let t1' = make_if (make_is_none_enc @@ make_var y1) (make_none_enc @@ get_opt_typ_enc t1.typ) t1 in
-            let t2 = make_some_enc @@ make_app (make_var x1') [make_get_val @@ make_var y2] in
-            let t2' = make_if (make_is_none_enc @@ make_var y2) (make_none_enc @@ get_opt_typ_enc t2.typ) t2 in
+            let t1 = make_some_enc @@ make_app (make_var x1') [ make_get_val @@ make_var y1 ] in
+            let t1' =
+              make_if (make_is_none_enc @@ make_var y1) (make_none_enc @@ get_opt_typ_enc t1.typ) t1
+            in
+            let t2 = make_some_enc @@ make_app (make_var x1') [ make_get_val @@ make_var y2 ] in
+            let t2' =
+              make_if (make_is_none_enc @@ make_var y2) (make_none_enc @@ get_opt_typ_enc t2.typ) t2
+            in
             let t_neq = make_pair t1' t2' in
             let z = Id.new_var ~name:"r" t1.typ in
-            let t_eq = make_let [z,t1] @@ make_pair (make_var z) (make_var z) in
-            let cond1 = make_and (make_is_some_enc @@ make_var y1) (make_is_some_enc @@ make_var y2) in
+            let t_eq = make_let [ (z, t1) ] @@ make_pair (make_var z) (make_var z) in
+            let cond1 =
+              make_and (make_is_some_enc @@ make_var y1) (make_is_some_enc @@ make_var y2)
+            in
             let cond2 = make_eq (make_get_val @@ make_var y1) (make_get_val @@ make_var y2) in
-            make_fun y' @@ make_lets [y1,ty1; y2,ty2] @@ make_if (make_and cond1 cond2) t_eq t_neq
+            make_fun y'
+            @@ make_lets [ (y1, ty1); (y2, ty2) ]
+            @@ make_if (make_and cond1 cond2) t_eq t_neq
         | _ -> make_pair (make_var x1') (make_var x1')
       in
-      make_let [x',t1'] t'
-  | Local(Decl_let [x,({desc=Tuple[{desc=Var (LId x1)};{desc=Var (LId x2)}]} as t1)], t) when is_non_rec [x,t1] ->
-      let x' =  trans.var (tt,bb) x in
-      let x1' = trans.var (tt,bb) x1 in
-      let x2' = trans.var (tt,bb) x2 in
-      let bb' = (LId x,t1)::bb in
-      let t' = trans.term (tt,bb') t in
+      make_let [ (x', t1') ] t'
+  | Local
+      ( Decl_let
+          [ (x, ({ desc = Tuple [ { desc = Var (LId x1) }; { desc = Var (LId x2) } ] } as t1)) ],
+        t )
+    when is_non_rec [ (x, t1) ] ->
+      let x' = trans.var (tt, bb) x in
+      let x1' = trans.var (tt, bb) x1 in
+      let x2' = trans.var (tt, bb) x2 in
+      let bb' = (LId x, t1) :: bb in
+      let t' = trans.term (tt, bb') t in
       let t1' =
-        match trans_typ (tt,bb) @@ Id.typ x with
-        | TFun(y, _) ->
+        match trans_typ (tt, bb) @@ Id.typ x with
+        | TFun (y, _) ->
             let y' = Id.new_var_id y in
             let ty1 = make_fst (make_var y') in
             let ty2 = make_snd (make_var y') in
             let y1 = Id.new_var ~name:(Id.name y ^ "1") ty1.typ in
             let y2 = Id.new_var ~name:(Id.name y ^ "2") ty2.typ in
-            let t1 = make_some_enc @@ make_app (make_var x1') [make_get_val @@ make_var y1] in
-            let t1' = make_if (make_is_none_enc @@ make_var y1) (make_none_enc @@ get_opt_typ_enc t1.typ) t1 in
-            let t2 = make_some_enc @@ make_app (make_var x2') [make_get_val @@ make_var y2] in
-            let t2' = make_if (make_is_none_enc @@ make_var y2) (make_none_enc @@ get_opt_typ_enc t2.typ) t2 in
-            make_fun y' @@ make_lets [y1,ty1; y2,ty2] @@ make_pair t1' t2'
+            let t1 = make_some_enc @@ make_app (make_var x1') [ make_get_val @@ make_var y1 ] in
+            let t1' =
+              make_if (make_is_none_enc @@ make_var y1) (make_none_enc @@ get_opt_typ_enc t1.typ) t1
+            in
+            let t2 = make_some_enc @@ make_app (make_var x2') [ make_get_val @@ make_var y2 ] in
+            let t2' =
+              make_if (make_is_none_enc @@ make_var y2) (make_none_enc @@ get_opt_typ_enc t2.typ) t2
+            in
+            make_fun y' @@ make_lets [ (y1, ty1); (y2, ty2) ] @@ make_pair t1' t2'
         | _ -> make_pair (make_var x1') (make_var x2')
       in
-      make_let [x',t1'] t'
-  | Local(Decl_let [x,({desc=Tuple ts} as t1)], t) when List.for_all Is._Var ts && is_non_rec [x,t1] ->
-      let xs = List.map (function {desc=Var (LId x)} -> x | t -> Format.eprintf "%a@." Print.term t; assert false) ts in
-      let x' =  trans.var (tt,bb) x in
-      let xs' = List.map (trans.var (tt,bb)) xs in
-      let bb' = (LId x,t1)::bb in
-      let t' = trans.term (tt,bb') t in
+      make_let [ (x', t1') ] t'
+  | Local (Decl_let [ (x, ({ desc = Tuple ts } as t1)) ], t)
+    when List.for_all Is._Var ts && is_non_rec [ (x, t1) ] ->
+      let xs =
+        List.map
+          (function
+            | { desc = Var (LId x) } -> x
+            | t ->
+                Format.eprintf "%a@." Print.term t;
+                assert false)
+          ts
+      in
+      let x' = trans.var (tt, bb) x in
+      let xs' = List.map (trans.var (tt, bb)) xs in
+      let bb' = (LId x, t1) :: bb in
+      let t' = trans.term (tt, bb') t in
       let t1' =
-        match trans_typ (tt,bb) @@ Id.typ x with
-        | TFun(y, _) ->
+        match trans_typ (tt, bb) @@ Id.typ x with
+        | TFun (y, _) ->
             let y' = Id.new_var_id y in
-            let tys = List.map (fun i -> make_proj i @@ make_var y') @@ List.fromto 0 @@ List.length ts in
-            let ys = List.mapi (fun i t -> Id.new_var ~name:(Id.name y ^ string_of_int (i+1)) t.typ) tys in
+            let tys =
+              List.map (fun i -> make_proj i @@ make_var y') @@ List.fromto 0 @@ List.length ts
+            in
+            let ys =
+              List.mapi (fun i t -> Id.new_var ~name:(Id.name y ^ string_of_int (i + 1)) t.typ) tys
+            in
             let aux xi' yi =
-              let ti = make_some_enc @@ make_app (make_var xi') [make_get_val @@ make_var yi] in
-              let ti' = make_if (make_is_none_enc @@ make_var yi) (make_none_enc @@ get_opt_typ_enc ti.typ) ti in
+              let ti = make_some_enc @@ make_app (make_var xi') [ make_get_val @@ make_var yi ] in
+              let ti' =
+                make_if
+                  (make_is_none_enc @@ make_var yi)
+                  (make_none_enc @@ get_opt_typ_enc ti.typ)
+                  ti
+              in
               ti'
             in
             let ts' = List.map2 aux xs' ys in
@@ -286,78 +300,79 @@ let trans_term (tt,bb) t =
             make_fun y' @@ make_lets bindings @@ make_tuple ts'
         | _ -> make_tuple @@ List.map make_var xs
       in
-      make_let [x',t1'] t'
-  | Local(Decl_let [x,({desc=Proj(i,{desc=Var (LId x1)})} as t1)], t) when is_non_rec [x,t1] ->
-      let x' = trans.var (tt,bb) x in
-      let x1' = trans.var (tt,bb) x1 in
-      let bb' = (LId x,t1)::bb in
-      let t' = trans.term (tt,bb') t in
+      make_let [ (x', t1') ] t'
+  | Local (Decl_let [ (x, ({ desc = Proj (i, { desc = Var (LId x1) }) } as t1)) ], t)
+    when is_non_rec [ (x, t1) ] ->
+      let x' = trans.var (tt, bb) x in
+      let x1' = trans.var (tt, bb) x1 in
+      let bb' = (LId x, t1) :: bb in
+      let t' = trans.term (tt, bb') t in
       let t1' =
         match Id.typ x1' with
         | TTuple _ -> make_proj i @@ make_var x1'
-        | TFun _ ->
-            begin match decomp_tfun_ttuple @@ Id.typ x1 with
+        | TFun _ -> (
+            match decomp_tfun_ttuple @@ Id.typ x1 with
             | None -> assert false
             | Some xtyps ->
                 let z = Id.new_var_id @@ fst @@ List.nth xtyps i in
-                let arg = make_tuple @@ List.mapi (fun j (z',_) -> if j = i then make_some_enc @@ make_var z else make_none_enc @@ Id.typ z') xtyps in
-                make_fun z @@ make_get_val @@ make_proj i @@ make_app (make_var x1') [arg]
-            end
+                let arg =
+                  make_tuple
+                  @@ List.mapi
+                       (fun j (z', _) ->
+                         if j = i then make_some_enc @@ make_var z else make_none_enc @@ Id.typ z')
+                       xtyps
+                in
+                make_fun z @@ make_get_val @@ make_proj i @@ make_app (make_var x1') [ arg ])
         | _ -> assert false
       in
-      make_let [x',t1'] t'
-  | _ -> trans.term_rec (tt,bb) t
+      make_let [ (x', t1') ] t'
+  | _ -> trans.term_rec (tt, bb) t
 
 let () = trans.term <- trans_term
 let () = trans.typ <- trans_typ
 
-
-
 let rec decomp_simple_let t =
   match t.desc with
-  | Local(Decl_let [x,t1],t2) when is_non_rec [x,t1] ->
-      let bindings,t2' = decomp_simple_let t2 in
-      (x,t1)::bindings, t2'
-  | _ -> [], t
+  | Local (Decl_let [ (x, t1) ], t2) when is_non_rec [ (x, t1) ] ->
+      let bindings, t2' = decomp_simple_let t2 in
+      ((x, t1) :: bindings, t2')
+  | _ -> ([], t)
 
 let sort_let_pair = Tr.make ()
 
 let sort_let_pair_aux x t =
-  let bindings,t' = decomp_simple_let t in
+  let bindings, t' = decomp_simple_let t in
   let bindings' = List.map (Pair.map_snd sort_let_pair.term) bindings in
-  let is_proj (_,t) =
-    match t.desc with
-    | Proj(_, {desc=Var (LId y)}) -> Id.(x = y)
-    | _ -> false
+  let is_proj (_, t) =
+    match t.desc with Proj (_, { desc = Var (LId y) }) -> Id.(x = y) | _ -> false
   in
-  let bindings1,bindings2 = List.partition is_proj bindings' in
+  let bindings1, bindings2 = List.partition is_proj bindings' in
   let t'' = sort_let_pair.term t' in
   make_lets bindings1 @@ make_lets bindings2 t''
 
 let sort_let_pair_term t =
   match t.desc with
-  | Local(Decl_let [x,({desc=Tuple _} as t1)],t2) when is_non_rec [x,t1] ->
+  | Local (Decl_let [ (x, ({ desc = Tuple _ } as t1)) ], t2) when is_non_rec [ (x, t1) ] ->
       let t2' = sort_let_pair_aux x t2 in
-      make_let [x,t1] t2'
-  | Local(Decl_let [f,t1],t2) ->
-      let xs,t1 = decomp_funs t1 in
+      make_let [ (x, t1) ] t2'
+  | Local (Decl_let [ (f, t1) ], t2) ->
+      let xs, t1 = decomp_funs t1 in
       let t1' = sort_let_pair.term t1 in
       let t2' = sort_let_pair.term t2 in
       let t1'' = List.fold_right sort_let_pair_aux xs t1' in
-      make_let [f, make_funs xs t1''] t2'
+      make_let [ (f, make_funs xs t1'') ] t2'
   | _ -> sort_let_pair.term_rec t
 
 let () = sort_let_pair.term <- sort_let_pair_term
-
-
-
 let move_proj = Tr.make ()
 
 let rec move_proj_aux x t =
   match Id.typ x with
   | TTuple xs ->
       let ts = List.mapi (fun i _ -> make_proj i @@ make_var x) xs in
-      let xs' = List.mapi (fun i x -> Id.new_var ~name:(Id.name x ^ string_of_int (i+1)) @@ Id.typ x) xs in
+      let xs' =
+        List.mapi (fun i x -> Id.new_var ~name:(Id.name x ^ string_of_int (i + 1)) @@ Id.typ x) xs
+      in
       let subst_rev' t x t_acc =
         let ts = col_same_term t t_acc in
         List.fold_right (fun t1 t2 -> subst_rev t1 x t2) ts t_acc
@@ -371,26 +386,23 @@ let rec move_proj_aux x t =
 
 let move_proj_term t =
   match t.desc with
-  | Local(Decl_let bindings,t2) ->
-      let bindings' = List.map (fun (f,t) -> f, move_proj.term t) bindings in
+  | Local (Decl_let bindings, t2) ->
+      let bindings' = List.map (fun (f, t) -> (f, move_proj.term t)) bindings in
       let t2' = move_proj.term t2 in
       let t2'' = List.fold_right (move_proj_aux -| fst) bindings t2' in
       make_let bindings' t2''
-  | Fun(x,t1) -> make_fun x @@ move_proj_aux x t1
+  | Fun (x, t1) -> make_fun x @@ move_proj_aux x t1
   | _ -> move_proj.term_rec t
 
 let () = move_proj.term <- move_proj_term
-
-
-
-
-let col_assert = Col.make [] (@@@)
+let col_assert = Col.make [] ( @@@ )
 
 let col_assert_desc desc =
   match desc with
-  | If(t1, t2, t3) when same_term t2 unit_term && same_term t3 (make_app fail_term [unit_term]) ->
-      [t1]
-  | Local(Decl_let [x,t1], t2) when is_non_rec [x,t1] ->
+  | If (t1, t2, t3) when same_term t2 unit_term && same_term t3 (make_app fail_term [ unit_term ])
+    ->
+      [ t1 ]
+  | Local (Decl_let [ (x, t1) ], t2) when is_non_rec [ (x, t1) ] ->
       let ts1 = col_assert.term t1 in
       let ts2 = col_assert.term t2 in
       let ts2' = List.map (subst x t1) ts2 in
@@ -399,25 +411,16 @@ let col_assert_desc desc =
 
 let () = col_assert.desc <- col_assert_desc
 let col_assert = col_assert.term
-
-
-let has_rand = Col.make false (||)
-
-let has_rand_const c =
-  match c with
-  | Rand _ -> true
-  | _ -> false
-
+let has_rand = Col.make false ( || )
+let has_rand_const c = match c with Rand _ -> true | _ -> false
 let () = has_rand.const <- has_rand_const
 let has_rand = has_rand.term
-
-
-let col_rand_funs = Col.make [] (@@@)
+let col_rand_funs = Col.make [] ( @@@ )
 
 let col_rand_funs_desc desc =
   match desc with
-  | Local(Decl_let bindings, t2) ->
-      let aux (f,t) = if has_rand t then [f] else [] in
+  | Local (Decl_let bindings, t2) ->
+      let aux (f, t) = if has_rand t then [ f ] else [] in
       let funs1 = List.flatten_map aux bindings in
       let funs2 = col_rand_funs.term_rec t2 in
       funs1 @ funs2
@@ -425,67 +428,51 @@ let col_rand_funs_desc desc =
 
 let () = col_rand_funs.desc <- col_rand_funs_desc
 let col_rand_funs = col_rand_funs.term
-
-
-let col_app_head = Col.make [] (@@@)
+let col_app_head = Col.make [] ( @@@ )
 
 let col_app_head_desc desc =
-  match desc with
-  | App({desc=Var (LId f)}, _) -> [f]
-  | _ -> col_app_head.desc_rec desc
+  match desc with App ({ desc = Var (LId f) }, _) -> [ f ] | _ -> col_app_head.desc_rec desc
 
 let () = col_app_head.desc <- col_app_head_desc
-
 let col_app_head = col_app_head.term
 
-
-let compare_pair (x1,x2) (y1,y2) =
-  if Id.(x1 = y2 && x2 = y1) then
-    0
+let compare_pair (x1, x2) (y1, y2) =
+  if Id.(x1 = y2 && x2 = y1) then 0
   else
     let r1 = compare x1 y1 in
-    if r1 <> 0 then
-      r1
-    else
-      compare x2 y2
+    if r1 <> 0 then r1 else compare x2 y2
 
 let eq_pair x y = 0 = compare_pair x y
-
 let col_fun_arg = Col.make [] (List.Set.union ~eq:eq_pair)
 
 let col_fun_arg_desc desc =
   match desc with
-  | App({desc=Var (LId f)}, ts) ->
+  | App ({ desc = Var (LId f) }, ts) ->
       let funs = List.flatten_map col_app_head ts in
-      List.map (fun g -> f, g) funs
+      List.map (fun g -> (f, g)) funs
   | _ -> col_fun_arg.desc_rec desc
 
 let () = col_fun_arg.desc <- col_fun_arg_desc
 let col_fun_arg = col_fun_arg.term
-
-
-
-let col_app_terms = Col2.make [] (@@@)
+let col_app_terms = Col2.make [] ( @@@ )
 
 let col_app_terms_term fs t =
   match t.desc with
-  | App({desc=Var (LId f)}, ts) when Id.List.mem f fs ->
+  | App ({ desc = Var (LId f) }, ts) when Id.List.mem f fs ->
       t :: List.flatten_map (col_app_terms.term fs) ts
   | _ -> col_app_terms.term_rec fs t
 
 let () = col_app_terms.term <- col_app_terms_term
 let col_app_terms = col_app_terms.term
 
-
-
 let replace_head fs fs' t =
   let ts = col_app_terms fs t in
   let rec aux fs ts =
-    match fs,ts with
+    match (fs, ts) with
     | [], [] -> []
     | [], _ -> unsupported "replace_head"
-    | f::fs', _ ->
-        let ts1,ts2 = List.partition (Id.List.mem f -| get_fv) ts in
+    | f :: fs', _ ->
+        let ts1, ts2 = List.partition (Id.List.mem f -| get_fv) ts in
         List.hd ts1 :: aux fs' (List.tl ts1 @ ts2)
   in
   let ts' = aux fs ts in
@@ -497,33 +484,33 @@ let replace_head fs fs' t =
   Debug.printf "t'':@.%a@.@." Print.term t'';
   t''
 
-
 let add_fun_tuple = Tr2.make ()
-
 let defined fs env = List.for_all (Id.List.mem -$- env) fs
 
-let add_fun_tuple_term (funs,env) t =
+let add_fun_tuple_term (funs, env) t =
   match t.desc with
-  | Local(Decl_let [f,t1],t2) ->
-      let env' = f::env in
-      let funs1,funs2 = List.partition (fun fs -> defined fs env') funs in
-      let t1' = add_fun_tuple.term (funs2,env') t1 in
-      let t2' = add_fun_tuple.term (funs2,env') t2 in
+  | Local (Decl_let [ (f, t1) ], t2) ->
+      let env' = f :: env in
+      let funs1, funs2 = List.partition (fun fs -> defined fs env') funs in
+      let t1' = add_fun_tuple.term (funs2, env') t1 in
+      let t2' = add_fun_tuple.term (funs2, env') t2 in
       let aux t fs =
         let name = String.join "__" @@ List.rev_map Id.name fs in
         let fg = Id.new_var ~name @@ make_ttuple @@ List.map Id.typ fs in
-        let projs = List.mapi (fun i g -> Id.new_var_id g, make_proj i (make_var fg)) fs in
+        let projs = List.mapi (fun i g -> (Id.new_var_id g, make_proj i (make_var fg))) fs in
         let t' = replace_head fs (List.map fst projs) t in
-        let defs = (fg, make_label ~label:"add_fun_tuple" (InfoString "") @@ make_tuple @@ List.map make_var fs)::projs in
+        let defs =
+          (fg, make_label ~label:"add_fun_tuple" (String "") @@ make_tuple @@ List.map make_var fs)
+          :: projs
+        in
         make_lets defs t'
       in
-      make_let [f,t1'] @@ List.fold_left aux t2' funs1
-  | Local(Decl_let _,_) -> unsupported "add_fun_tuple (let (rec) ... and ...)"
-  | _ -> add_fun_tuple.term_rec (funs,env) t
+      make_let [ (f, t1') ] @@ List.fold_left aux t2' funs1
+  | Local (Decl_let _, _) -> unsupported "add_fun_tuple (let (rec) ... and ...)"
+  | _ -> add_fun_tuple.term_rec (funs, env) t
 
 let () = add_fun_tuple.term <- add_fun_tuple_term
-let add_fun_tuple rel_funs t = add_fun_tuple.term (rel_funs,[]) t
-
+let add_fun_tuple rel_funs t = add_fun_tuple.term (rel_funs, []) t
 
 let make_fun_tuple t =
   let asserts = col_assert t in
@@ -536,26 +523,25 @@ let make_fun_tuple t =
     let funs' = List.Set.diff ~eq:Id.eq funs rand_funs in
     List.iter (Debug.printf "FUN': %a@." Id.print) funs';
     let rec get_pairs acc fs =
-      match fs with
-      | [] -> acc
-      | f::fs' -> get_pairs (List.map (fun g -> (f,g)) fs' @ acc) fs'
+      match fs with [] -> acc | f :: fs' -> get_pairs (List.map (fun g -> (f, g)) fs' @ acc) fs'
     in
     let all_fun_pairs = get_pairs [] funs' in
-    List.iter (fun (f,g) -> Debug.printf "ALL_FUN_ARG: %a, %a@." Id.print f Id.print g) all_fun_pairs;
+    List.iter
+      (fun (f, g) -> Debug.printf "ALL_FUN_ARG: %a, %a@." Id.print f Id.print g)
+      all_fun_pairs;
     let fun_args = col_fun_arg assrt in
-    List.iter (fun (f,g) -> Debug.printf "FUN_ARG: %a, %a@." Id.print f Id.print g) fun_args;
+    List.iter (fun (f, g) -> Debug.printf "FUN_ARG: %a, %a@." Id.print f Id.print g) fun_args;
     let rel_funs = List.Set.diff ~eq:eq_pair all_fun_pairs fun_args in
-    List.iter (fun (f,g) -> Debug.printf "FUN_ARG': %a, %a@." Id.print f Id.print g) rel_funs;
-    List.map (fun (f,g) -> [f;g]) rel_funs
+    List.iter (fun (f, g) -> Debug.printf "FUN_ARG': %a, %a@." Id.print f Id.print g) rel_funs;
+    List.map (fun (f, g) -> [ f; g ]) rel_funs
   in
   let rel_funs = List.flatten_map aux asserts in
   let t' = add_fun_tuple rel_funs t in
   Debug.printf "@.@.%a@." Print.term t';
   t'
 
-
-
-let trans t = t
+let trans t =
+  t
   |@> Debug.printf "INPUT: %a@." Print.term
   |> Trans.remove_label ~label:"add_fun_tuple"
   |@> Debug.printf "remove_label: %a@." Print.term_typ
@@ -572,10 +558,9 @@ let trans t = t
   |> sort_let_pair.term
   |@> Debug.printf "sort_let_pair: %a@." Print.term_typ
   |@> Type_check.check
-  |> trans.term (assert_false,[])
+  |> trans.term (assert_false, [])
   |> Trans.inline_no_effect
   |@> Debug.printf "ref_trans: %a@." Print.term
   |@> Type_check.check
 
-let trans t =
- trans t, fun _ _ -> raise Not_found
+let trans t = (trans t, fun _ _ -> raise Not_found)

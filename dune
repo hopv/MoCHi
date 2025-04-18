@@ -1,1 +1,6 @@
-(dirs src lib \ benchmark)
+(library
+ (name ppx_mochi)
+ (kind ppx_rewriter)
+ (libraries ppxlib str)
+ (preprocess
+  (pps ppxlib.metaquot)))

@@ -1,7 +1,8 @@
+open CEGAR_syntax
+
 (** Predicate abstraction *)
 
 exception NotRefined
 
-val abstract : CEGAR_syntax.var list -> ?preprocessed:CEGAR_syntax.prog -> CEGAR_syntax.prog -> CEGAR_syntax.var list * CEGAR_syntax.prog * CEGAR_syntax.prog
-
+val abstract : ?preprocessed:prog -> prog -> var list * prog * prog * (var * var) list
 val incr_wp_max : bool ref

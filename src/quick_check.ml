@@ -2,8 +2,6 @@ open Util
 open Type
 open Term_util
 
-module RT = Ref_type
-
 let generate ty =
   match ty with
   | TUnit -> Term.unit
@@ -11,9 +9,12 @@ let generate ty =
   | TInt -> Term.int @@ int_of_float @@ Random.gaussian 256.
 
 let check ?limit t =
-  let gen () = int_of_float @@ Random.gaussian 256. in
+  let gen ty _ =
+    assert (ty = TBase TInt);
+    Term.int @@ int_of_float @@ Random.gaussian 256.
+  in
   try
-    ignore @@ Eval.eval_print Format.dummy_formatter (ref 0) limit gen t;
+    Eval.eval_print ?limit gen ignore t;
     true
   with
   | Eval.RaiseExcep _ -> false
@@ -21,8 +22,5 @@ let check ?limit t =
   | Eval.ReachLimit -> true
   | Eval.ReachBottom -> true
 
-let rec repeat n t =
-  n <= 0 || check ~limit:1000 t && repeat (n-1) t
-
-let rec repeat_forever t =
-  check t && repeat_forever t
+let rec repeat n t = n <= 0 || (check ~limit:1000 t && repeat (n - 1) t)
+let rec repeat_forever t = check t && repeat_forever t

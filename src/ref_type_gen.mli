@@ -1,22 +1,21 @@
+open Syntax
 open Ref_type
 
 val generate_check :
-  Syntax.typ option ->
-  ?make_fail:(Syntax.typ -> Syntax.term) ->
-  (t * (Syntax.id * Syntax.term)) list ->
-  (t * (Syntax.id * Syntax.term)) list ->
-  Syntax.id ->
+  typ_exn:typ option ->
+  ?make_fail:(typ -> term) ->
+  genv:(t * (id * term)) list ->
+  cenv:(t * (id * term)) list ->
+  id ->
   t ->
-  (t * (Syntax.id * Syntax.term)) list *
-  (t * (Syntax.id * Syntax.term)) list *
-  Syntax.term
+  (t * (id * term)) list * (t * (id * term)) list * term
 
 val generate :
-  Syntax.typ option ->
-  ?make_fail:(Syntax.typ -> Syntax.term) ->
-  (t * (Syntax.id * Syntax.term)) list ->
-  (t * (Syntax.id * Syntax.term)) list ->
+  typ_exn:typ option ->
+  ?make_fail:(typ -> term) ->
+  genv:(t * (id * term)) list ->
+  cenv:(t * (id * term)) list ->
   t ->
-  (t * (Syntax.id * Syntax.term)) list *
-  (t * (Syntax.id * Syntax.term)) list *
-  Syntax.term
+  (t * (id * term)) list * (t * (id * term)) list * term
+
+val add_assert_assume : ?annot:(term -> term) -> bool -> term -> t -> term

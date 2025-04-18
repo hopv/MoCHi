@@ -1,242 +1,56 @@
 open Util
 open Mochi_util
+open Preprocess_common
+
+type nonrec t = t
 
 (** Print types without checking the type consistency *)
-module Debug_ty_wo_check = Debug.Make(struct let check = Flag.Debug.make_check (__MODULE__^".ty_wo_check") end)
+module Debug_ty_wo_check = Debug.Make (struct
+  let check = Flag.Debug.make_check (__MODULE__ ^ ".ty_wo_check")
+end)
 
-let all = Flag.Debug.make_check (__MODULE__^".all")
+let all = Flag.Debug.make_check (__MODULE__ ^ ".all")
 
 (** Print types and check the type consistency *)
-module Debug_ty = Debug.Make(struct let check = Flag.Debug.make_check (__MODULE__^".ty") ||| all end)
+module Debug_ty = Debug.Make (struct
+  let check = Flag.Debug.make_check (__MODULE__ ^ ".ty") ||| all
+end)
 
 (** Check the consistency of free variablse *)
-module Debug_fv = Debug.Make(struct let check = Flag.Debug.make_check (__MODULE__^".fv") ||| all end)
+module Debug_fv = Debug.Make (struct
+  let check = Flag.Debug.make_check (__MODULE__ ^ ".fv") ||| all
+end)
 
 (** Check the non-existence of LDot and LApp after extracting modules *)
-module Debug_lid = Debug.Make(struct let check = Flag.Debug.make_check (__MODULE__^".lid") ||| all end)
+module Debug_lid = Debug.Make (struct
+  let check = Flag.Debug.make_check (__MODULE__ ^ ".lid") ||| all
+end)
 
 (** Print results even for unchanged cases *)
-module Debug_tree = Debug.Make(struct let check = Flag.Debug.make_check (__MODULE__^".tree") end)
+module Debug_tree = Debug.Make (struct
+  let check = Flag.Debug.make_check (__MODULE__ ^ ".tree")
+end)
 
 (** Print problems by Problem.pp *)
-module Debug_pp = Debug.Make(struct let check = Flag.Debug.make_check (__MODULE__^".pp") end)
+module Debug_pp = Debug.Make (struct
+  let check = Flag.Debug.make_check (__MODULE__ ^ ".pp")
+end)
 
-module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
+(** Print counterexamples one-by-one (Calculation of counterexamples will be forced) *)
+module Debug_cex = Debug.Make (struct
+  let check = Flag.Debug.make_check (__MODULE__ ^ ".cex")
+end)
 
-type debug = {debug_label:label; debug_problem:Problem.t; debug_args:string list}
-
-and t = label * (descr * tr)
-and tr = Problem.t -> tr_result option
-and tr_result = op * problem LazyList.t
-and descr = string
-
-and tree =
-  | Before of problem
-  | After of {id : int;
-              time : float;
-              label : label;
-              descr : string;
-              no_change : bool;
-              problem : problem option; (* None if !Flag.Method.reduce_memory is true *)
-              op : op;
-              result : tree LazyList.t}
-
-and problem = Problem.t * get_rtyp
-and get_rtyp = (Syntax.id -> Ref_type.t) -> Syntax.id -> Ref_type.t
-and op = And | Or
-and path = node list
-and node = label * (descr * problem)
-
-and label =
-  | Init
-  | Ref_type_pred_type_check
-  | Set_main
-  | Eliminate_unused_let
-  | Replace_const
-  | Lift_type_decl
-  | Inline_record_type
-  | Encode_lazy
-  | Encode_mutable_record
-  | Encode_record
-  | Encode_array
-  | Abst_ref
-  | Abst_object
-  | Make_fun_tuple
-  | Rename_target_ext_funs
-  | Make_ext_funs
-  | Copy_poly_values
-  | Copy_poly_type
-  | Ignore_non_termination
-  | Eliminate_redundant_arguments
-  | Recover_const_attr
-  | Decomp_pair_eq
-  | Add_preds
-  | Add_preds_CPS
-  | Replace_fail_with_raise
-  | Ignore_data_arg
-  | Ignore_excep_arg
-  | Ignore_excep_fun_arg
-  | Ignore_mutual_data_arg
-  | Encode_recdata
-  | Encode_option
-  | Replace_base_with_int
-  | Replace_list_with_int
-  | Replace_data_with_int
-  | Replace_data_with_int_but_exn
-  | Abstract_exn
-  | Inline_type_decl
-  | Encode_list
-  | Abst_div
-  | Ret_fun
-  | Ref_trans
-  | Tupling
-  | Inline
-  | Mark_safe_fun_arg
-  | CPS
-  | Remove_pair
-  | Replace_bottom_def
-  | Add_cps_preds
-  | Eliminate_same_arguments
-  | Insert_unit_param
-  | Extract_module
-  | Remove_ext_typ
-  | Inline_functor
-  | Mark_fv_as_external
-  | Alpha_rename
-  | Instansiate_weak_poly_types
-  | Abst_recursive_record
-  | Inline_simple_types
-  | Abst_polymorphic_comparison
-  | Abst_literal
-  | Encode_bool_as_int
-  | Reduce_rand
-  | Reduce_ignore
-  | Reduce_branch
-  | Split_assert
-  | Insert_extra_param
-  | Replace_complex_data_with_int
-  | Variant_args_to_tuple
-  | Unify_pure_fun_app
-  | Add_occurence_param
-  | Slice
-  | Split_by_ref_type
-  | Slice_top_fun
-  | Set_main_sliced
-  | Merge_deref
-  | Elim_unused_assumption
-  | Set_to_primitive
-  | Inline_exn_type
-  | Inline_type_alias
-  | Inline_ext_rebind
-  | Abstract_first_class_module
-  | Abstract_magical_functions
-  | Add_external_types
-  | Replace_abst_with_int
-  | Instansiate_matched_poly
-  | Abstract_polymorphic_variant
-  | Abstract_GADT
-  | Abst_format_const
-  | Extract_include
-  | Make_bind_for_PAlias
-  | Inline_tvar
-  | Encode_enum_variant
-  | Encode_nonrec_variant
-  | Reduce_fail_free
-  | Abstract_menhir
-
-let measure_time f t = Time.measure_and_add Flag.Log.Time.preprocess f t
-
-let rec get r =
-  match r with
-  | Before(p,_) -> Problem.term p
-  | After {result} ->
-      match LazyList.next result with
-      | Cons(r, rs) when LazyList.is_empty rs -> get r
-      | _ -> unsupported "Multiple targets"
-
-let root r =
-  match r with
-  | Before(p,_) -> Some p
-  | After {problem} -> Option.map fst problem
-
-let rec exists_or r =
-  match r with
-  | Before _ -> false
-  | After {op=And; result} -> LazyList.exists exists_or result
-  | After {op=Or; result} when LazyList.is_singleton result -> exists_or @@ LazyList.hd result
-  | After {op=Or} -> true
-
-let rec list_of_leaves r =
-  match r with
-  | Before pg -> [pg]
-  | After {op=And; result} -> List.flatten_map list_of_leaves @@ LazyList.to_list result
-  | After {op=Or; result} when LazyList.is_singleton result -> list_of_leaves @@ LazyList.hd result
-  | After {op=Or} -> unsupported "Multiple targets"
-
-let rec lists_of_paths (r:tree) : path list =
-  match r with
-  | Before problem -> [[Init, ("Init", problem)]]
-  | After {label; descr; problem; op=And; result} ->
-      result
-      |> LazyList.to_list
-      |> List.flatten_map lists_of_paths
-      |> List.map (List.cons (label, (descr, Option.get problem)))
-  | After {label; descr; problem; op=Or; result} when LazyList.is_singleton result ->
-      let r = LazyList.hd result in
-      List.map (List.cons (label, (descr, Option.get problem))) @@ lists_of_paths r
-  | After {op=Or} -> unsupported "Multiple targets"
-
-let last (acc:path) = snd @@ snd @@ List.hd acc
-let last_problem (acc:path) = fst @@ last acc
-let last_get_rtyp (acc:path) = snd @@ last acc
-let take_result l (acc:path) = fst @@ snd @@ List.assoc l acc
-
-let get_rtyp_id get_rtyp f = get_rtyp f
-let with_get_rtyp_id ?(op=And) problems = Some (op, LazyList.map (Pair.pair -$- get_rtyp_id) problems)
-
-let if_ b (tr:tr) x : tr_result option = if b then tr x else None
-let map_list ?(op=And) (tr:Problem.t->Problem.t LazyList.t) r : tr_result option = Some (op, LazyList.map (Pair.pair -$- get_rtyp_id) @@ tr r)
-let map tr = map_list (tr |- LazyList.singleton)
-let map_term tr = map_list (Problem.map tr |- LazyList.singleton)
-let map_option (tr : Problem.t -> Problem.t option) problem =
-  match tr problem with
-  | None -> None
-  | Some problem' -> Some (And, LazyList.singleton (problem', get_rtyp_id))
-let map_list_option (tr : Problem.t -> Problem.t LazyList.t option) problem =
-  match tr problem with
-  | None -> None
-  | Some problems -> Some (And, LazyList.map (Pair.pair -$- get_rtyp_id) problems)
-let singleton tr = Option.some -| Pair.pair And -| LazyList.singleton -| tr
-let exists tr : tr = Option.some -| Pair.pair Or -| tr
-
-let assoc label pps =
-  List.find ((=) label -| fst) pps
-
-let before label (pps:t list) =
-  List.takewhile ((<>) label -| fst) pps
-
-let before_and label (pps:t list) =
-  List.takewhile ((<>) label -| fst) pps @ [assoc label pps]
-
-let and_after label (pps:t list) =
-  List.dropwhile ((<>) label -| fst) pps
-
-let after label (pps:t list) =
-  List.tl @@ and_after label pps
-
-let split label (pps:t list) =
-  let pps1,pps2 = List.takedrop_while ((<>) label -| fst) pps in
-  pps1, snd (List.hd pps2), List.tl pps2
-
-let filter_out labels pps =
-  List.filter_out (fst |- List.mem -$- labels) pps
+module Debug = Debug.Make (struct
+  let check = Flag.Debug.make_check __MODULE__
+end)
 
 let all () : t list =
   let open Trans_problem in
   [
     Init,
       ("Init",
-       Fun.const None);
+       id);
     Abstract_menhir, (* TODO: must check the existence of assert/raise *)
       ("Abstract functions generated by Menhir",
        if_ !Flag.Abstract.menhir @@
@@ -260,9 +74,6 @@ let all () : t list =
     Extract_module,
       ("Extract module",
        map Module.extract);
-    Add_external_types,
-      ("Add external type definitions",
-       map add_ext_typ);
     Instansiate_weak_poly_types,
       ("Instansiate weakly polymorphic types",
        map_term Trans.instansiate_weak_poly_types);
@@ -277,7 +88,7 @@ let all () : t list =
        map_term Trans.inline_tvar);
     Lift_type_decl,
       ("Lift type decl",
-       map lift_type_decl);
+       map_term Trans.lift_type_decl);
     Ref_type_pred_type_check,
       ("Type check of refinement type predicates",
        map Ref_type_pred_typing.ref_type_pred_typing);
@@ -292,13 +103,15 @@ let all () : t list =
        map_term Trans.inline_exn_type);
     Set_main,
       ("Set main",
-       map_list set_main);
+       map_lazy_list_with_info set_main);
+  (*
     Split_by_ref_type,
       ("Split by refinement types",
        map_list_option split_by_ref_type);
+  *)
     Eliminate_unused_let,
       ("Eliminate unused let",
-       map_list ~op:Or elim_unused_let);
+       map_lazy_list ~op:Or elim_unused_let);
     Reduce_fail_free,
       ("Reduce fail free",
        if_ (not !Flag.Method.modular) @@
@@ -311,9 +124,6 @@ let all () : t list =
       ("Encode bool as int",
        if_ !Flag.Encode.bool_to_int @@
        map_term Trans.encode_bool_as_int);
-    Abst_format_const,
-      ("Abstract format constants",
-       map_term Trans.abst_format_const);
     Replace_const,
       ("Replace const",
        if_ !Flag.Method.replace_const @@
@@ -323,24 +133,37 @@ let all () : t list =
        map rename_target_ext_funs);
     Copy_poly_values,
       ("Copy polymorphic values",
-       singleton copy_poly_values);
+       map_with_get_rtyp @@ copy_poly_values);
     Copy_poly_type,
       ("Copy polymorphic types",
        map_term Trans.copy_poly_type);
+    Add_ref_check,
+      ("Add assert and assume for refinement types",
+       map_with_trans_cex add_ref_check);
     Slice_top_fun,
       ("Slice by top-level function definitions",
        if_ !Flag.Method.sub @@
-       map_list ~op:Or slice_top_fun);
+       Prep_dslice.slice_top_fun);
+    Slice_top_fun,
+      ("Slice by top-level function definitions based on hops",
+       if_ !Flag.Method.sub_hops @@
+       map_lazy_list_with_info ~op:Or Prep_dslice.slice_top_fun_by_hops);
     Set_main_sliced,
       ("Set main for slice",
        if_ !Flag.Method.sub @@
-       map_list set_main_for_slice);
+       map_lazy_list_gen Prep_dslice.set_main Option.some);
     Elim_unused_assumption,
       ("Eliminate unused assumptions",
        map elim_unused_assumption);
     Encode_lazy,
       ("Encode lazy",
        map Encode.lazy_);
+    Reduce_external,
+      ("Reduce external functions",
+       map reduce_external);
+    Abst_literal,
+      ("Abstract literal",
+       map_term Trans.abst_literal);
     Encode_mutable_record,
       ("Encode mutable record",
        map Encode.mutable_record);
@@ -415,7 +238,7 @@ let all () : t list =
     Make_ext_funs,
       ("Generate external functions",
        if_ (not !Flag.Method.encode_before_make_ext_fun) @@
-       map make_ext_funs);
+       map_with_trans_cex make_ext_funs);
     Encode_enum_variant,
       ("Encode enum variant 1",
        map Encode.enum_variant);
@@ -462,17 +285,18 @@ let all () : t list =
     Inline_type_decl,
       ("Inline type decl",
        map_term Trans.inline_type_decl);
-    Abst_literal,
-      ("Abstract literal",
-       map_term Trans.abst_literal);
     Encode_list,
       ("Encode list",
-       singleton Encode.list);
+       map_with_get_rtyp Encode.list);
+    Merge_branch,
+      ("Merge the same branches 1",
+       map_term Trans.merge_branch);
     Replace_abst_with_int,
       ("Replace abstract types with int",
        map replace_abst_with_int);
     Abst_div,
       ("Abstract division",
+       if_ !Flag.Abstract.div @@
        map_term Trans.abst_div);
     Unify_pure_fun_app,
       ("Unify applications of pure functions",
@@ -480,25 +304,25 @@ let all () : t list =
     Ret_fun,
       ("Ret fun",
        if_ !Flag.Method.tupling @@
-       singleton @@ Problem.map_on Focus.fst Ret_fun.trans);
+       map_with_get_rtyp @@ Problem.map_on Focus.fst Ret_fun.trans);
     Ref_trans,
       ("Ref trans",
        if_ !Flag.Method.tupling @@
-       singleton @@ Problem.map_on Focus.fst Ref_trans.trans);
+       map_with_get_rtyp @@ Problem.map_on Focus.fst Ref_trans.trans);
     Tupling,
       ("Tupling",
        if_ !Flag.Method.tupling @@
-       singleton @@ Problem.map_on Focus.fst Tupling.trans);
+       map_with_get_rtyp @@ Problem.map_on Focus.fst Tupling.trans);
     Inline,
       ("Inline",
        map inline);
     Make_ext_funs,
-      ("Generate external function",
+      ("Generate external functions",
        if_ !Flag.Method.encode_before_make_ext_fun @@
-       map make_ext_funs);
+       map_with_trans_cex make_ext_funs);
     Reduce_rand,
       ("Reduce rand",
-       map_term Trans.reduce_rand);
+       map_with_trans_cex reduce_rand);
     Reduce_ignore,
       ("Reduce ignore",
        map_term Trans.reduce_ignore);
@@ -508,7 +332,7 @@ let all () : t list =
     Split_assert,
       ("Split assert",
        if_ !Flag.Method.split_assert @@
-       map_list split_assert);
+       map_list split_assert); (* TODO: add info *)
     Mark_safe_fun_arg,
       ("Mark safe fun arg",
        if_ !Flag.PredAbst.shift_pred @@
@@ -522,15 +346,18 @@ let all () : t list =
     Slice,
       ("Slice",
        if_ !Flag.Method.slice @@
-       map_list ~op:Or Slice.slice_problem);
+       map_with_trans_cex Slice.slice_problem);
+    Merge_branch,
+      ("Merge the same branches 2",
+       map_term Trans.merge_branch);
     CPS,
       ("CPS",
        if_ !Flag.Method.trans_to_CPS @@
-       singleton CPS.trans);
+       map_with_get_rtyp CPS.trans);
     Remove_pair,
       ("Remove pair",
        if_ !Flag.Method.trans_to_CPS @@
-       singleton Curry.remove_pair);
+       map_with_get_rtyp Curry.remove_pair);
     Add_occurence_param,
       ("Add occurence parameters",
        if_ !Flag.Method.occurence_param @@
@@ -552,195 +379,301 @@ let all () : t list =
     Alpha_rename,
       ("Alpha renaming",
        if_ Flag.(!mode <> Termination) @@
-       singleton alpha_rename);
-  ]
+       map_with_get_rtyp alpha_rename);
+  ] [@ocamlformat "disable"]
 
 let pr () =
-  if !!Debug_pp.check then
-    Problem.pp
-  else if !!Debug_ty.check || !!Debug_ty_wo_check.check then
-    Problem.print_debug
-  else
-    Problem.print
-let print s_id desc problem =
-  Verbose.printf "%a###[%.3f]%s%t %a:@. @[%a@.@." Color.set Color.Green !!Time.get s_id Color.reset Color.s_red desc !!pr problem
+  if !!Debug_pp.check then Problem.pp
+  else if !!Debug_ty.check || !!Debug_ty_wo_check.check then Problem.print_debug
+  else Problem.print
 
-let print_log_tree fm t =
-  let rec pr indent first last t =
-    let indent' =
-      if last then
-        indent ^ "  "
-      else
-        indent ^ "│ "
-    in
-    let head =
-      if first then
-        ""
-      else if last then
-        "└─"
-      else
-        "├─"
-    in
+let print id desc problem =
+  Verbose.printf "%a###[%.3f][#%d]%t %a:@. @[%a@.@." Color.set Color.Green !!Time.get id Color.reset
+    Color.s_red desc !!pr problem
+
+let print_if_changed id desc before after =
+  if (not (Problem.eq before after)) || !!Debug.check then print id desc after
+
+let print_tree fm t =
+  let rec pr indent parent first last t =
+    let indent' = if last then indent ^ "  " else indent ^ "│ " in
+    let head = if first then "" else if last then "└─" else "├─" in
     match t with
-    | Before _ -> ()
-    | After {result} when not @@ Lazy.is_val result ->
-        Format.fprintf fm "%s%s(delayed)@\n" indent head;
-    | After {label; no_change; result} when label <> Init && no_change && not !!Debug_tree.check ->
-        pr indent false last @@ List.get @@ LazyList.to_list result
-    | After {id; time; descr; result} ->
-        let children =
-          let rec aux result =
-            if Lazy.is_val result then
-              match Lazy.force result with
-              | LazyList.Nil -> []
-              | LazyList.Cons(t',result') -> t'::aux result'
-            else
-              []
-          in
-          aux result
-        in
+    | Before { id; time } ->
+        Format.fprintf fm "%s%s[#%d %a@@ %.3f%t] %s@\n" indent head id Color.set Color.Green time
+          Color.reset parent
+    | After { node = { id; time }; descr; children; next } ->
         let len = List.length children in
-        Format.fprintf fm "%s%s[#%d %a@@ %.3f%t] %s@\n" indent head id Color.set Color.Green time Color.reset descr;
-        List.iteri (fun i t -> pr indent' false (i=len-1) t) children
+        let flag = if next <> None then "+" else "" in
+        Format.fprintf fm "%s%s%s[#%d %a@@ %.3f%t] %s@\n" indent head flag id Color.set Color.Green
+          time Color.reset parent;
+        List.iteri (fun i t -> pr indent' descr false (i = len - 1) t) @@ List.rev children
   in
-  pr "" true true t
-
-
-(* BUGGY *)
-let write_debug_file label problem =
-  let file = Filename.change_extension !!Flag.IO.temp "debug" in
-  let debug =
-    let debug_label = label in
-    let debug_problem = problem in
-    let debug_args = !Flag.Log.args in
-    {debug_label; debug_problem; debug_args}
-  in
-  Marshal.to_file ~flag:[Marshal.Closures] file debug
+  pr "" "Init" true true t
 
 let check_init ~ty ~fv ~lid ~descr problem =
-  if !Flag.Preprocess.check_flag && (ty || fv || lid) then
+  if !Flag.Preprocess.check_flag && (ty || fv || lid) then (
     let before = Problem.safety Term_util.Term.unit in
     let after = problem in
     Color.printf Green {|### Check "%s"@.|} descr;
     if ty then Check.type_ problem;
     if fv then Check.fv ~force:true ~before ~after;
     if lid then Check.lid problem;
-    Color.printf Green "### Check DONE@.@."
+    Color.printf Green "### Check DONE@.@.")
 
-let check ~ty ~fv ~lid ~label ~descr ~before ~after ~write_debug =
-  if !Flag.Preprocess.check_flag && (ty || fv || lid) then
-    try
-      Color.printf Green {|### Check "%s"@.|} descr;
-      if ty then Check.type_ after;
-      if fv then Check.fv ~force:true ~before ~after;
-      if fv then Check.free_types ~before ~after;
-      if lid then Check.lid after;
-      Color.printf Green "### Check DONE@.@."
-    with e when write_debug -> write_debug_file label before; raise e
+let check ~ty ~fv ~lid ~descr ~before ~after =
+  if !Flag.Preprocess.check_flag && (ty || fv || lid) then (
+    Color.printf Green {|### Check "%s"@.|} descr;
+    if ty then Check.type_ after;
+    if fv then Check.fv ~force:true ~before ~after;
+    if fv then Check.free_types ~before ~after;
+    if lid then Check.lid after;
+    Color.printf Green "### Check DONE@.@.")
 
-let trans_and_print
-      ?(id : int option)
-      ?(write_debug = false)
-      ((label,(descr,tr)) : t)
-      (problem : Problem.t) =
-  let s_id =
-    match id with
-    | None -> ""
-    | Some id -> Format.sprintf "[#%d]" id
-  in
-  Debug.printf "START[%.3f]%s: %s@." !!Time.get s_id descr;
-  let r = tr problem in
+let verif_result_of_CEGAR_result
+    (make_get_rtyp : (CEGAR_syntax.var -> CEGAR_ref_type.t) -> Trans.get_rtyp) (r : CEGAR.result) :
+    verif_result =
   match r with
-  | None ->
-      Debug.printf "END  [%.3f]%s (skipped): %s@.@." !!Time.get s_id descr;
-      if label = Init then begin
-          print s_id descr problem;
-          check_init ~ty:!!Debug_ty.check ~fv:!!Debug_fv.check ~lid:!!Debug_lid.check ~descr problem;
-          if !Flag.Preprocess.stop_after = "Init" then exit 0;
-        end;
-      None
-  | Some(op,rs) ->
-      match LazyList.next rs with
-      | Cons(r,_) when label <> Init && problem = fst r ->
-          Debug.printf "END  [%.3f]%s (without change): %s@.@." !!Time.get s_id descr;
-          if descr = !Flag.Preprocess.stop_after then
-            exit 0;
-          if descr = !Flag.Preprocess.check_after then
-            Flag.Preprocess.check_flag := true;
-          None
-      | _ ->
-          Debug.printf "END  [%.3f]%s: %s@.@." !!Time.get s_id descr;
-          if !!Verbose.check || !!Debug.check || !!Debug_ty.check then
-            let pr (problem',_) =
-              if problem <> problem' then
-                print s_id descr problem';
-              check ~ty:!!Debug_ty.check ~fv:!!Debug_fv.check ~lid:!!Debug_lid.check ~label ~descr ~before:problem ~after:problem' ~write_debug
-            in
-            if descr = !Flag.Preprocess.stop_after then
-              (LazyList.iter pr rs;
-               exit 0);
-            if descr = !Flag.Preprocess.check_after then
-              Flag.Preprocess.check_flag := true;
-            Some(op, LazyList.map (fun r -> pr r; r) rs)
+  | Safe env -> Safe (make_get_rtyp (List.assoc ~eq:( = ) -$- env))
+  | Unsafe (sol, orig) ->
+      let vals_main = lazy (List.map Term_util.Term.int sol, None) in
+      Unsafe { vals_main; orig }
+  | Unknown _ -> Unknown "" (* TODO *)
+
+(* TODO: case of both results are Safe *)
+let merge_and_result r1 r2 =
+  match (r1, r2) with
+  | Safe _, r | r, Safe _ -> r
+  | (Unsafe _ as r), _ | _, (Unsafe _ as r) -> r
+  | Unknown _, Unknown _ -> Unknown ""
+
+(* N.B.: non-commutative *)
+let merge_or_result prev next =
+  match (prev, next) with
+  | Unsafe _, Unsafe _ -> next
+  | _, Unsafe _ -> prev
+  | (Safe _ as r), _ | _, (Safe _ as r) -> r
+  | (Unknown _ as r), _ | _, (Unknown _ as r) -> r
+
+let cex_opt = function Unsafe cex -> Some cex | _ -> None
+let get_rtyp_opt = function Safe get_rtyp -> Some get_rtyp | _ -> None
+let get_rtyp_of_or = List.find_map get_rtyp_opt
+let get_rtyp_of_and = List.map (Option.get -| get_rtyp_opt)
+
+type verif_result_with = id * info * verif_result
+
+let make_get_rtyp op { make_get_rtyp = make } (rs : verif_result_with list) : Trans.get_rtyp =
+  let get = Triple.trd |- get_rtyp_opt in
+  let get_rtyps = lazy (List.filter_map get rs) in
+  match make with
+  | Some mk -> mk !?get_rtyps
+  | None -> (
+      match op with
+      | Or -> List.find_map get rs
+      | And ->
+          fun x ->
+            let tys = List.map (( @@ ) -$- x) !?get_rtyps in
+            let base = Ref_type.to_simple @@ List.hd tys in
+            Ref_type.Inter (base, tys))
+
+(* The order of rs matters; the head is the first result *)
+let trans_counterexample (_label : after_label) (_op : op) (trans_cex : trans_cex option)
+    (rs : verif_result_with list) : counterexample =
+  let rs' =
+    rs |> List.filter_map (function i, info, Unsafe ce -> Some (i, info, ce) | _ -> None)
+  in
+  match trans_cex with
+  | None -> Triple.trd @@ List.last rs'
+  | Some tr ->
+      let vals_main =
+        lazy (tr @@ List.map (fun (id, info, { vals_main }) -> (id, info, vals_main)) rs')
+      in
+      let _, _, { orig } = List.hd rs' (* ASSUME: all the orig are the same *) in
+      { vals_main; orig }
+
+let make_result label r op pullback (rs : verif_result_with list) =
+  match r with
+  | Safe _ -> Safe (make_get_rtyp op pullback rs)
+  | Unsafe _ -> Unsafe (trans_counterexample label op pullback.trans_cex rs)
+  | Unknown _ -> r
+
+let complete_results (results : results) tree : results =
+  let rec comp results tree : (info * verif_result) option * results option =
+    match tree with
+    | (Before node | After { node }) when IdMap.mem node.id results ->
+        (Some (IdMap.find node.id results), None)
+    | Before _ -> (None, None)
+    | After ({ node; op; next; children; pullback } as label) ->
+        let rs, updated =
+          List.L.fold_left children ~init:([], None) ~f:(fun (rs, updated) tree ->
+              let result, updated' = comp results tree in
+              let result' =
+                match result with
+                | None -> rs
+                | Some (_info, r) ->
+                    let node = node_of_root tree in
+                    (node.id, node.info, r) :: rs
+              in
+              let updated' =
+                match (updated, updated') with
+                | Some r1, Some r2 -> Some (r1 +++ r2)
+                | Some _, None -> updated
+                | None, _ -> updated'
+              in
+              (result', updated'))
+        in
+        let rs : verif_result_with list = List.sort (Compare.on Triple.fst) rs in
+        let r : verif_result option =
+          if rs = [] then None
           else
-            Some(op, rs)
-
-let make_init problem = Before(problem, get_rtyp_id)
-
-let rec map_before f t =
-  match t with
-  | Before problem -> f problem
-  | After r ->
-      let result = LazyList.map (map_before f) r.result in
-      After {r with result}
-
-(* BUGGY *)
-let save_to_file ?num (label:label) (problem:problem) =
-  let ext =
-    match num with
-    | None -> "pp.bin"
-    | Some n -> "pp." ^ string_of_int n ^ ".bin"
+            let merge = match op with And -> merge_and_result | Or -> merge_or_result in
+            rs |> List.map Triple.trd |> List.reduce_left merge |> Option.some
+        in
+        let r' =
+          match (r, op, next) with
+          | None, _, _ -> None
+          | Some (Safe _), And, Some _ -> None
+          | Some (Unsafe _), Or, Some _ -> None
+          | Some r, _, _ ->
+              let r' = make_result label r op pullback rs in
+              Some (node.info, r')
+        in
+        let r'_with = match r' with None -> IdMap.empty | Some r -> IdMap.singleton node.id r in
+        let updated' =
+          match (r', updated) with
+          | None, _ -> updated
+          | Some _, None -> Some r'_with
+          | Some _, Some updated -> Some (r'_with +++ updated)
+        in
+        (r', updated')
   in
-  let filename = Filename.change_extension !!Flag.IO.temp ext in
-  Marshal.to_file ~flag:[ Marshal.No_sharing ;Marshal.Closures] filename (label,problem)
+  match comp results tree with _, None -> results | _, Some updated -> updated +++ results
 
-let load_from_file filename : (label * problem) =
-  Marshal.from_file_exn filename
+let result_of ?(complete = true) (results : results) (tree : tree) =
+  let results' = if complete then complete_results results tree else results in
+  (results', IdMap.find_opt (id_of_root tree) results')
 
-let run (pps:t list) (results:tree) : tree =
-  let counter = ref 0 in
-  let f (label,(descr,_) as pp) problem =
-    incr counter;
-    let id = !counter in
-    let time = !!Time.get in
-    let op, no_change, result =
-      match trans_and_print ~id pp (fst problem) with
-      | None -> And, true, LazyList.singleton (Before problem)
-      | Some(op,rs) ->
-          if !Flag.Preprocess.save_preprocess then save_to_file ~num:!counter label problem;
-          op, false, LazyList.map (fun r -> Before r) rs
-    in
-    let problem =
-      if !Flag.Preprocess.reduce_memory then
-        None
-      else
-        Some problem
-    in
-    After {id; time; label; descr; no_change; problem; op; result}
-  in
-  let rec aux acc pps =
-    match pps with
-    | [] -> acc
-    | ltr::pps' ->
-        let acc' = map_before (f ltr) acc in
-        aux acc' pps'
-  in
-  measure_time (aux results) pps
+let get_set_main tree =
+  match find_label Set_main tree with
+  | [ After { children = [ tree ] } ] -> Some (node_of_root tree)
+  | _ -> None
 
-let restart pps =
-  let label,problem = load_from_file !!Flag.IO.main in
-  let pps = and_after label pps in
-  fst problem, run pps (Before problem)
+let ready_of children =
+  match children with
+  | Before { id; info; problem; rest } :: _ -> if rest = [] then Some (id, info, problem) else None
+  | _ -> [%invalid_arg]
+
+type result_one_step = {
+  ready : ready option;  (** a preprocessed problem that is obtained by the expansion *)
+  tree : tree;  (** the resulting tree. *)
+  expanded : bool;  (** whether the input tree is expanded or not. *)
+  id : int;  (** increased from the input [id] if the tree is expanded and unchanged otherwise*)
+}
+(** Note: Even if [expanded] is false, [tree'] may be different from [tree] since [next] would be updated to [None]. *)
+
+(** [run_one_step n results tree] expands the input preprocess-tree [tree] just ones. *)
+let rec run_one_step (id : int) (results : results) (tree : tree) : result_one_step =
+  match tree with
+  | Before { rest = [] } -> { ready = None; tree; expanded = false; id }
+  | Before ({ rest = (label, (descr, (op, tr))) :: rest } as node) ->
+      let ready, tree', id' =
+        if label = Init then (
+          print 0 descr node.problem;
+          if !Flag.Preprocess.stop_after = "Init" then exit 0);
+        Debug.printf "[BEGIN] %s@." descr;
+        let stop_if () = if !Flag.Preprocess.stop_after = descr then exit 0 in
+        let pullback, translated = tr node.problem in
+        match translated with
+        | None ->
+            Debug.printf "[END] %s (without changes)@.@." descr;
+            stop_if ();
+            let tree' = Before { node with rest } in
+            let ready = ready_of [ tree' ] in
+            (ready, tree', id)
+        | Some ((info, problem), next) ->
+            Debug.printf "[END] %s@.@." descr;
+            check ~ty:!!Debug_ty.check ~fv:!!Debug_fv.check ~lid:!!Debug_lid.check ~descr
+              ~before:node.problem ~after:problem;
+            print_if_changed id descr node.problem problem;
+            stop_if ();
+            let node = { node with rest } in
+            let time = !!Time.get in
+            let children = [ Before { id; time; info; problem; rest } ] in
+            let ready = ready_of children in
+            (ready, After { node; op; label; descr; next; children; pullback }, id + 1)
+      in
+      { ready; tree = tree'; expanded = true; id = id' }
+  | After ({ node; descr; children; next } as arg) -> (
+      match result_of ~complete:false results tree with
+      | _, Some _ -> { ready = None; tree; expanded = false; id }
+      | _, None -> (
+          let ready, children, expanded, id' =
+            List.L.fold_right children ~init:(None, [], false, id)
+              ~f:(fun child (ready, acc, expanded, id) ->
+                if expanded then (
+                  assert (ready = None);
+                  (ready, child :: acc, expanded, id))
+                else
+                  let { ready; tree = child'; expanded; id = id' } =
+                    run_one_step id results child
+                  in
+                  (ready, child' :: acc, expanded, id'))
+          in
+          if expanded then { ready; tree = After { arg with children }; expanded; id = id' }
+          else
+            match next with
+            | None -> { ready; tree = After { arg with children }; expanded = false; id = id' }
+            | Some (Trans tr) -> (
+                let ids = List.map id_of_root children in
+                let results' = List.filter_map (IdMap.find_opt -$- results) ids in
+                match tr results' with
+                | None ->
+                    {
+                      ready;
+                      tree = After { arg with children; next = None };
+                      expanded = false;
+                      id = id';
+                    }
+                | Some ((info, problem), next) ->
+                    print id descr problem;
+                    let time = !!Time.get in
+                    let children =
+                      Before { id; time; info; problem; rest = node.rest } :: children
+                    in
+                    let ready = ready_of children in
+                    {
+                      ready;
+                      tree = After { arg with children; next };
+                      expanded = true;
+                      id = id + 1;
+                    })))
+
+type result = {
+  ready : ready option;
+  tree : tree;
+  expanded : bool;
+  counter : int;
+  results : results;
+}
+(** The meanings of the first three values are the same as [result_one_step]. *)
+
+(** Evaluate multi-steps until a new instance is ready. *)
+let rec run counter results (tree : tree) : result =
+  let results, r = result_of results tree in
+  match r with
+  | Some _ -> { ready = None; tree; expanded = false; counter; results }
+  | None -> (
+      match run_one_step counter results tree with
+      | { ready = None; tree = tree'; expanded = true; id = counter' } -> run counter' results tree'
+      | { ready = Some _; expanded = false } -> assert false
+      | { ready; tree = tree'; expanded = b; id = counter' } ->
+          { ready; tree = tree'; expanded = b; counter = counter'; results })
+
+let run counter results (tree : tree) = measure_time (run counter results) tree
+
+let make_init pps problem =
+  let time = !!Time.get in
+  Before { id = 0; time; problem; info = None; rest = pps }
 
 let check_duplicate pps =
   let ss = List.map (snd |- fst) pps in
@@ -748,10 +681,9 @@ let check_duplicate pps =
 
 let run_problem pps problem =
   if !!Debug.check then check_duplicate pps;
-  run pps @@ make_init problem
+  run 1 IdMap.empty @@ make_init pps problem
 
-let run_on_term pps t =
-  t
-  |> Problem.safety
-  |> run_problem pps
-  |> get
+let get_problem_of { ready } = ready |> Option.get |> Triple.trd
+
+let run_on_term ?(make = Problem.safety) pps t =
+  t |> make |> run_problem pps |> get_problem_of |> Problem.term

@@ -1,29 +1,29 @@
 open Util
 
-module Debug = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
+module Debug = Debug.Make (struct
+  let check = Flag.Debug.make_check __MODULE__
+end)
 
 module S = CEGAR_syntax
 module U = CEGAR_util
 
 let parse_atom s len i =
-  if len <= i then
-    i, None
+  if len <= i then (i, None)
   else if s.[i] = '|' then
     try
-      let j = String.index_from s (i+1) '|' in
-      j+1, Some (String.sub s i (j-i+1))
+      let j = String.index_from s (i + 1) '|' in
+      (j + 1, Some (String.sub s i (j - i + 1)))
     with Not_found -> invalid_arg "Smtlib2_interface.parse_atom"
   else
     let rec aux acc_rev s len i =
       let return () = Some (String.of_list @@ List.rev acc_rev) in
-      if len <= i then
-        i, !!return
+      if len <= i then (i, !!return)
       else
         match s.[i] with
-        | c when Char.is_whitespace c -> i, !!return
-        | ')' when acc_rev = [] -> i, None
-        | ')' -> i, !!return
-        | c -> aux (c::acc_rev) s len (i+1)
+        | c when Char.is_whitespace c -> (i, !!return)
+        | ')' when acc_rev = [] -> (i, None)
+        | ')' -> (i, !!return)
+        | c -> aux (c :: acc_rev) s len (i + 1)
     in
     aux [] s len i
 
@@ -34,42 +34,45 @@ let term_of_atom a =
   match a with
   | "true" -> true_
   | "false" -> false_
-  | _ ->
-      try
-        int (int_of_string a)
-      with _ -> var a
+  | _ -> ( try int (int_of_string a) with _ -> var a)
 
 let binop_of_atom a =
   let open U.Term in
   match a with
   | "=" -> S.make_eq_int
-  | "<" -> (<)
-  | ">" -> (>)
-  | "<=" -> (<=)
-  | ">=" -> (>=)
-  | "+" -> (+)
-  | "-" -> (-)
+  | "<" -> ( < )
+  | ">" -> ( > )
+  | "<=" -> ( <= )
+  | ">=" -> ( >= )
+  | "+" -> ( + )
+  | "-" -> ( - )
   | "*" -> ( * )
   | "div" -> ( / )
-  | "mod" -> (mod)
+  | "mod" -> ( mod )
   | _ -> unsupported "binop_of_atom %s" a
 
 let rec term_of_sexp s =
   let open Sexp in
   match s with
   | A a -> term_of_atom a
-  | S [A "not"; s'] -> S.make_not @@ term_of_sexp s'
-  | S [A ("exists"|"forall" as s); S args; s'] ->
-      let xs = List.map (function S [A x; _] -> S.Var x | _ -> invalid_arg "term_of_sexp") args in
-      S.make_app (S.Var s) [S.make_app (S.Var "args") xs; term_of_sexp s']
+  | S [ A "not"; s' ] -> S.make_not @@ term_of_sexp s'
+  | S [ A (("exists" | "forall") as s); S args; s' ] ->
+      let xs =
+        List.map (function S [ A x; _ ] -> S.Var x | _ -> invalid_arg "term_of_sexp") args
+      in
+      S.make_app (S.Var s) [ S.make_app (S.Var "args") xs; term_of_sexp s' ]
   | S (A "and" :: ss) -> S.make_ands @@ List.map term_of_sexp ss
   | S (A "or" :: ss) -> S.make_ors @@ List.map term_of_sexp ss
   | S (A "+" :: s' :: ss) -> List.fold_left S.make_add (term_of_sexp s') @@ List.map term_of_sexp ss
-  | S [A "-"; s] -> U.Term.(int 0 - term_of_sexp s)
-  | S [A "let"; S defs; s'] ->
-      let defs' = List.map (function S [A x; s] -> x, term_of_sexp s | _ -> invalid_arg "term_of_sexp") defs in
+  | S [ A "-"; s ] -> U.Term.(int 0 - term_of_sexp s)
+  | S [ A "let"; S defs; s' ] ->
+      let defs' =
+        List.map
+          (function S [ A x; s ] -> (x, term_of_sexp s) | _ -> invalid_arg "term_of_sexp")
+          defs
+      in
       U.subst_map defs' @@ term_of_sexp s'
-  | S [A a; s1; s2] when a.[0] <> '|' -> binop_of_atom a (term_of_sexp s1) (term_of_sexp s2)
+  | S [ A a; s1; s2 ] when a.[0] <> '|' -> binop_of_atom a (term_of_sexp s1) (term_of_sexp s2)
   | S (A a :: ss) when a.[0] = '|' -> S.make_app (term_of_atom a) @@ List.map term_of_sexp ss
   | S (A "!" :: s' :: _) -> term_of_sexp s'
   | _ ->
@@ -89,20 +92,17 @@ let parse_model str =
   let open Sexp in
   let sol =
     match s with
-    | [A "unsat"; _] -> failwith "Recursive HCCS unsatisfiable?"
-    | [A "sat"; S (A "model" :: sol)]
-    | [A "sat"; S sol] -> sol
+    | [ A "unsat"; _ ] -> failwith "Recursive HCCS unsatisfiable?"
+    | [ A "sat"; S (A "model" :: sol) ] | [ A "sat"; S sol ] -> sol
     | _ -> !!unsupported
   in
   sol
   |> List.map (function
-         | S (A "define-fun" :: A id :: S args :: A _ty :: body :: []) ->
-             let args =
-               args
-               |> List.map (function
-                      | S (A x::A ty::[]) -> x, type_of_atom ty
-                      | _ -> !!unsupported)
-             in
-             let body = term_of_sexp body in
-             id, (args, body)
-         | _ -> !!unsupported)
+       | S [ A "define-fun"; A id; S args; A _ty; body ] ->
+           let args =
+             args
+             |> List.map (function S [ A x; A ty ] -> (x, type_of_atom ty) | _ -> !!unsupported)
+           in
+           let body = term_of_sexp body in
+           (id, (args, body))
+       | _ -> !!unsupported)

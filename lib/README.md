@@ -32,7 +32,7 @@ T (terms) ::=
   | T @@ T   (* T must be a list *)
   | T @ T    (* same as @@ *)
   | [%e e]   (* dynamic code *)
-  | `X       (* same as [%e X] *)
+  | `X       (* same as [%e X] except for the head of an application *)
   | true
   | false
   | [] TA

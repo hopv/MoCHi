@@ -1,25 +1,29 @@
 open Syntax
 
-type config =
-    {ty : bool;         (** print types of arguments *)
-     as_ocaml : bool;   (** print terms in OCaml syntax *)
-     for_dmochi : bool; (** print terms for dmochi when as_ocaml=true *)
-     top : bool;        (** print let/type as in top-level *)
-     unused : bool;     (** print unused arguments *)
-     depth : int;       (** max depth of printing terms *)
-     length : int;      (** max depth of printing terms *)
-     omit_id : id list} (** variables whose names are unique *)
+type config = {
+  ty : bool;  (** print types of arguments *)
+  as_ocaml : bool;  (** print terms in OCaml syntax *)
+  for_dmochi : bool;  (** print terms for dmochi when as_ocaml=true *)
+  top : bool;  (** print let/type as in top-level *)
+  unused : bool;  (** print unused arguments *)
+  depth : int;  (** max depth of printing terms *)
+  length : int;  (** max depth of printing terms *)
+  omit_id : id list;
+}
+(** variables whose names are unique *)
 
 val config_default : config ref
 
-(** {1 Printer settings} *)
 val set_as_ocaml : unit -> unit
+(** {1 Printer settings} *)
+
 val set_unused : unit -> unit
 val set_depth : int -> unit
 val set_length : int -> unit
 
-(** {1 Printers of types/terms} *)
 val location : Format.formatter -> Location.t -> unit
+(** {1 Printers of types/terms} *)
+
 val typ : Format.formatter -> typ -> unit
 val lid : Format.formatter -> lid -> unit
 val lid_typ : Format.formatter -> lid -> unit
@@ -50,24 +54,46 @@ val constr : Format.formatter -> Type.constr -> unit
 val tconstr : Format.formatter -> Type.tconstr -> unit
 val path : Format.formatter -> Type.path -> unit
 
-(** {1 General printers} *)
 val int : Format.formatter -> int -> unit
+(** {1 General printers} *)
+
 val float : Format.formatter -> float -> unit
 val char : Format.formatter -> char -> unit
 val bool : Format.formatter -> bool -> unit
 val string : Format.formatter -> string -> unit
 val option : (Format.formatter -> 'a -> unit) -> Format.formatter -> 'a option -> unit
-val pair : (Format.formatter -> 'a -> unit) -> (Format.formatter -> 'b -> unit) -> Format.formatter -> ('a * 'b) -> unit
-val ( * ) : (Format.formatter -> 'a -> unit) -> (Format.formatter -> 'b -> unit) -> Format.formatter -> ('a * 'b) -> unit
-val triple : (Format.formatter -> 'a -> unit) -> (Format.formatter -> 'b -> unit) -> (Format.formatter -> 'c -> unit) -> Format.formatter -> ('a * 'b * 'c) -> unit
+
+val pair :
+  (Format.formatter -> 'a -> unit) ->
+  (Format.formatter -> 'b -> unit) ->
+  Format.formatter ->
+  'a * 'b ->
+  unit
+
+val ( * ) :
+  (Format.formatter -> 'a -> unit) ->
+  (Format.formatter -> 'b -> unit) ->
+  Format.formatter ->
+  'a * 'b ->
+  unit
+
+val triple :
+  (Format.formatter -> 'a -> unit) ->
+  (Format.formatter -> 'b -> unit) ->
+  (Format.formatter -> 'c -> unit) ->
+  Format.formatter ->
+  'a * 'b * 'c ->
+  unit
+
 val list : ?limit:int -> (Format.formatter -> 'a -> unit) -> Format.formatter -> 'a list -> unit
 val ignore : ?str:string -> Format.formatter -> 'a -> unit
 val __ : Format.formatter -> 'a -> unit
-val (|>) : ('a -> 'b) -> (Format.formatter -> 'b -> unit) -> Format.formatter -> 'a -> unit
-val (<|) : (Format.formatter -> 'b -> unit) -> ('a -> 'b) -> Format.formatter -> 'a -> unit
+val ( |> ) : ('a -> 'b) -> (Format.formatter -> 'b -> unit) -> Format.formatter -> 'a -> unit
+val ( <| ) : (Format.formatter -> 'b -> unit) -> ('a -> 'b) -> Format.formatter -> 'a -> unit
 
-(** {1 Translator for string} *)
 val string_of_constr : desc -> string
+(** {1 Translator for string} *)
+
 val string_of_const : const -> string
 val string_of_binop : binop -> string
 val string_of_typ : typ -> string

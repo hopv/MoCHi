@@ -4,66 +4,53 @@ open Type_util
 open Syntax
 open Term_util
 
-module Dbg = Debug.Make(struct let check = Flag.Debug.make_check __MODULE__ end)
+module Dbg = Debug.Make (struct
+  let check = Flag.Debug.make_check __MODULE__
+end)
 
-let abst_first_class_module_term,abst_first_class_module_typ =
+let abst_first_class_module_term, abst_first_class_module_typ =
   let tr = Tr2.make () in
   let make_bind used t1 =
-    Flag.Abstract.use "First class module";
+    Flag.Abstract.over "First class module";
     let name = "FirstClassModule" in
     let t1' = tr.term used t1 in
-    let f = gen_fresh_name_var_int !used @@ (Id.new_var ~name t1'.typ) in
+    let f = gen_fresh_name_var_int !used @@ Id.new_var ~name t1'.typ in
     used := f :: !used;
-    f, Term.let_ [f, t1']
+    (f, Term.let_ [ (f, t1') ])
   in
-  tr.term <- (fun used t ->
-    match t.desc with
-    | Pack t1 ->
-        let _,def = make_bind used t1 in
-        let t =
-          if has_fail t1 then
-            Term.fail
-          else
-            Term.unit
-        in
-        let u = Id.new_var Ty.unit in
-        def Term.(fun_ u t)
-    | Unpack t1 ->
-        let f,def = make_bind used t1 in
-        let ty = tr.typ used t.typ in
-        let t = Term.(var f @ [unit])in
-        def Term.(seq t (rand ~expand:false ty))
-    | _ -> set_afv_shallowly @@ tr.term_rec used t);
-  tr.typ <- (fun used ty ->
-    match ty with
-    | TPackage _ -> Ty.(fun_ unit unit)
-    | _ -> tr.typ_rec used ty);
-  (fun t -> tr.term (ref (col_modules t)) t),
-  tr.typ (ref [])
+  tr.term <-
+    (fun used t ->
+      match t.desc with
+      | Pack t1 ->
+          let _, def = make_bind used t1 in
+          let t = if has_fail t1 then Term.fail else Term.unit in
+          let u = Id.new_var Ty.unit in
+          def Term.(fun_ u t)
+      | Unpack t1 ->
+          let f, def = make_bind used t1 in
+          let ty = tr.typ used t.typ in
+          let t = Term.(var f @ [ unit ]) in
+          def Term.(seq t (rand ~expand:false ty))
+      | _ -> set_afv_shallowly @@ tr.term_rec used t);
+  tr.typ <-
+    (fun used ty -> match ty with TPackage _ -> Ty.(fun_ unit unit) | _ -> tr.typ_rec used ty);
+  ((fun t -> tr.term (ref (col_modules t)) t), tr.typ (ref []))
 
 let abst_first_class_module (problem : Problem.t) =
   let term = abst_first_class_module_term problem.term in
-  let ext_typ = Fmap.(list (snd (snd abst_first_class_module_typ))) problem.ext_typ in
-  {problem with term; ext_typ}
+  let ext_mod_typ = Fmap.(list (snd abst_first_class_module_typ)) problem.ext_mod_typ in
+  { problem with term; ext_mod_typ }
 
 (* TODO: ad-hoc *)
 let subst_tconstr_label_by_name venv =
-  let venv = List.filter (fst |- is_mod_var) venv in
-  let is_delimiter = List.mem -$- ['.'; '('; ')'] in
-  let replace str (by, sub) =
-    let ss = String.split_on_string str ~by in
-    if List.for_all (fun s -> s = "" || is_delimiter (String.last s) && is_delimiter s.[0]) ss then
-      String.join sub ss
-    else
-      str
-  in
-  let map = List.map (Pair.map_same Id.name) venv in
-  let f_str = List.fold_left replace -$- map in
-  let f_path = Path.map_name f_str in
-  let f_ty = map_path f_path in
-  let tr = Tr.make () in
-  tr.typ <- f_ty;
-  tr.term
+  if venv = [] then Fun.id
+  else
+    let replace str (by, sub) =
+      try match String.split str ~by with "", s when s.[0] = '.' -> sub ^ s | _ -> str
+      with _ -> str
+    in
+    let map = List.map (Pair.map_same Id.name) venv in
+    Trans.map_typ @@ map_path (Path.map ~f:(Id.map_name (List.fold_left replace -$- map)))
 
 (* substitute ext_row_path in Type_ext *)
 let subst_ext_path_map =
@@ -71,242 +58,250 @@ let subst_ext_path_map =
   let sbst = List.subst ~eq:Path.eq in
   let tr_desc map desc =
     match desc with
-    | Local(Type_ext (Ext_type (path,(params,row))), t) when not (Path.eq path row.ext_row_path) (* ??? *) ->
-        let row' = {row with ext_row_path = sbst map row.ext_row_path} in
-        Local(Type_ext (Ext_type (path,(params,row'))), tr.term map t)
-    | Local(Type_ext (Ext_rebind (c, path)), t) ->
+    | Local (Type_ext (Ext_type (path, (params, row))), t)
+      when not (Path.eq path row.ext_row_path) (* ??? *) ->
+        let row' = { row with ext_row_path = sbst map row.ext_row_path } in
+        Local (Type_ext (Ext_type (path, (params, row'))), tr.term map t)
+    | Local (Type_ext (Ext_rebind (c, path)), t) ->
         let path' = sbst map path in
         let map' = List.filter_out (fst |- Path.eq (Type.LId c)) map in
-        Local(Type_ext (Ext_rebind (c, path')), tr.term map' t)
-    | Module decls ->
-        decls
-        |> trans_decls_as_term (tr.term map)
-        |> _Module
+        Local (Type_ext (Ext_rebind (c, path')), tr.term map' t)
+    | Module decls -> decls |> trans_decls_as_term (tr.term map) |> _Module
     | _ -> tr.desc_rec map desc
   in
   tr.desc <- tr_desc;
-  tr.term
+  fun map t -> if map = [] then t else tr.term map t
 
-type env =
-  {venv : (id * id) list;           (* value environment *)
-   tenv : (tconstr * tconstr) list; (* type environment *)
-   cenv : (path * path) list}       (* constructor environment *)
+let dbg = true
 
-let subst' {venv; tenv; cenv} t =
-  Dbg.printf "venv: %a@." Print.(list (id * id)) venv;
-  Dbg.printf "tenv: %a@." Print.(list (tconstr * tconstr)) tenv;
-  Dbg.printf "cenv: %a@." Print.(list (path * path)) cenv;
-  Dbg.printf "t: %a@." Print.term t;
-  t
-  |> subst_var_map_without_typ @@ Fmap.(list (snd _LId)) venv
-  |@> Dbg.printf "t1: %a@." Print.term
-  |> subst_tconstr_label_map tenv
-  |@> Dbg.printf "t2: %a@." Print.term
-  |> subst_tconstr_label_by_name venv (* TODO: too ad-hoc *)
-  |@> Dbg.printf "t3: %a@." Print.term
-  |> subst_ext_path_map cenv
-  |@> Dbg.printf "t': %a@.@." Print.term
-let subst'_typ env ty = trans_typ_as_term (subst' env) ty
+type env = {
+  prefix : string;  (** prefix of the current module *)
+  penv : (unit Id.t * string) list;  (** path/prefix environment *)
+  cenv : (unit Id.t * string) list;  (** type-constructor/prefix environment *)
+  tenv : term Tenv.t;  (** type environment *)
+}
 
-(* All variables must be unique *)
-let extract_path path =
-  let name = Path.to_string path in
-  let attr = (if Path.is_primitive path then [Id.Primitive] else []) @ (if Path.is_external path then [Id.External] else []) in
-  Type.LId (Id.make name () ~attr)
-
-let add_prefix m env decl =
-  let prefix = Id.name m ^ "." in
-  let add x = Id.add_name_before prefix x in
-  let adds xs =
-    let xs' = Fmap.(list (fst add)) xs in
-    xs', List.map2 (fun (x,_) (x',_) -> x, x') xs xs'
+let extract_path (path : path) : path =
+  let x =
+    match path with
+    | LId c -> c
+    | LDot _ ->
+        let name = Path.to_string path in
+        let attr =
+          (if Path.is_primitive path then [ Id.Primitive ] else [])
+          @ if Path.is_external path then [ Id.External ] else []
+        in
+        Id.make name () ~attr
+    | LApp _ -> assert false
   in
-  let sbst env = trans_decl_as_term (subst' env) in
+  LId x
+
+let extract_and_complete_path env (path : path) : path =
+  let prefix =
+    match path with
+    | LId c -> Id.List.assoc_default "" c env.cenv
+    | LDot _ -> Id.List.assoc_default "" (Path.head path) env.penv
+    | LApp _ -> assert false
+  in
+  match extract_path path with LId c -> LId (Id.add_name_prefix prefix c) | _ -> assert false
+
+let prefix_of_string s = String.rsplit ~by:"." s |> fst
+
+let prefix_of_path (p : Path.t) =
+  match p with LId _ -> "" | LDot (p, _) -> Path.to_string p ^ "." | _ -> [%invalid_arg]
+
+let rec find_constr_prefix env path =
+  match Tenv.assoc_type_opt path env with
+  | Some ({ prefix }, (_, (TVariant _ | TRecord _))) ->
+      Path.string_of_option prefix ^ prefix_of_path path
+  | Some ({ env }, (_, TConstr (path', _))) -> find_constr_prefix env path'
+  | Some _ -> assert false
+  | None -> assert false
+
+let extract_and_complete_constr_path typ env (path : path) : path =
+  let prefix =
+    match (path, typ) with
+    | LId _, TConstr (path, _) -> find_constr_prefix env.tenv path
+    | LId _, TVariant _ -> ""
+    | LId _, TRecord _ -> ""
+    | LDot _, _ -> Id.List.assoc_default "" (Path.head path) env.penv
+    | _ -> assert false
+  in
+  match extract_path path with LId c -> LId (Id.add_name_prefix prefix c) | _ -> assert false
+
+let extract_lid (tr : env Tr2.t) env (lid : lid) ty : lid =
+  let x =
+    match lid with
+    | LId c -> Id.map_typ (tr.typ env) c
+    | LDot _ ->
+        let prefix = Id.List.assoc_default "" (Id.set_typ (Lid.head lid) ()) env.penv in
+        let name = prefix ^ Lid.to_string lid in
+        let attr = if Id.is_external (Lid.head lid) then [ Id.External ] else [] in
+        Id.make name ty ~attr
+    | LApp _ -> assert false
+  in
+  LId x
+
+let extract_decl (tr : env Tr2.t) env (decl : declaration) : env * declaration =
+  let add x = Id.add_name_prefix env.prefix x in
+  let add_typ typ =
+    match typ with
+    | TVariant (k, rows) ->
+        let rows' = List.map (fun row -> { row with row_constr = add row.row_constr }) rows in
+        TVariant (k, rows')
+    | TRecord fields ->
+        let fields' = List.map (Pair.map_fst add) fields in
+        TRecord fields'
+    | _ -> typ
+  in
   match decl with
-  | Decl_let defs ->
-      let defs,map = adds defs in
-      let env = {env with venv = map @ env.venv} in
-      let defs' = Fmap.(list (pair (Id.map_typ (subst'_typ env)) (subst' env))) defs in
-      env, Decl_let defs'
+  | Decl_let defs -> (env, Decl_let (List.map (Pair.map (add -| tr.var env) (tr.term env)) defs))
   | Decl_type decls ->
-      let decls,map = adds decls in
-      let env = {env with tenv = map @ env.tenv} in
-      env, sbst env (Decl_type decls)
-  | Type_ext (Ext_type (path,(params,row))) ->
-      let ext_row_path =
-        if C.is_exn path then (* WORKAROUND: for the consistency with tr.term *)
-          extract_path row.ext_row_path
-        else
-          extract_path @@ Path.cons m row.ext_row_path
+      let env' =
+        let cenv = List.fold_left (fun acc (c, _) -> (c, env.prefix) :: acc) env.cenv decls in
+        let cenv =
+          List.L.fold_left decls ~init:cenv ~f:(fun cenv (_, (_, ty)) ->
+              match ty with
+              | TVariant (_, rows) ->
+                  List.rev_map_append (fun { row_constr } -> (row_constr, env.prefix)) rows cenv
+              | _ -> cenv)
+        in
+        { env with cenv }
       in
-      let env = {env with cenv = (row.ext_row_path,ext_row_path)::env.cenv} in
-      env, sbst env (Type_ext (Ext_type (path,(params,row))))
+      let decls' =
+        List.map (fun (c, (params, ty)) -> (add c, (params, tr.typ env' @@ add_typ ty))) decls
+      in
+      (env', Decl_type decls')
+  | Type_ext (Ext_type (path, (params, { ext_row_path; ext_row_args; ext_row_ret }))) ->
+      let path' : path = extract_and_complete_path env path in
+      let ext_row_path : path =
+        match ext_row_path with LId c -> LId (add c) | _ -> [%unsupported]
+      in
+      let ext_row_args = List.map (tr.typ env) ext_row_args in
+      let ext_row_ret = Option.map (tr.typ env) ext_row_ret in
+      (env, Type_ext (Ext_type (path', (params, { ext_row_path; ext_row_args; ext_row_ret }))))
   | Type_ext (Ext_rebind (c, path)) ->
-      let path = extract_path path in
-      let c' = add c in
-      {env with cenv = (LId c, LId c')::env.cenv},
-      sbst env (Type_ext (Ext_rebind (c', path)))
-  | Include _ -> [%unsupported]
-  | Decl_multi _ -> [%unsupported]
+      (env, Type_ext (Ext_rebind (add c, extract_and_complete_path env path)))
+  | Include _ -> assert false
+  | Decl_multi _ -> assert false
 
 let extract_term, extract_typ, extract_var =
   let tr = Tr2.make () in
-  (* TODO: Are tr_id_aux & tr_lid OK? *)
-  let tr_id_aux lid ty =
-    let x =
-      match lid with
-      | LId x -> Id.set_typ x ty
-      | LDot _ ->
-          let name = Lid.to_string lid in
-          let attr = if Id.is_external (Lid.head lid) then [Id.External] else [] in
-          Id.make name ~attr ty
-      | LApp _ -> unsupported "%s" __FUNCTION__
-    in
-    LId x
-  in
-  let add_prefix_exn (prefix,penv,_) c =
-    match c, prefix, Id.List.assoc_opt (Path.head c) penv with
-    | _, _, Some (Some prefix') ->
-        Type.LDot(prefix', Path.name c)
-    | LId _, Some p, _ -> Type.LDot(p, Path.name c)
-    | _ -> c
-  in
-  tr.lid <- (fun env lid ->
-    Lid.typ lid
-    |> tr.typ env
-    |> tr_id_aux lid);
-  tr.term <- (fun (prefix,penv,menv as env) t ->
-    match t.desc with
-    | Var lid -> (* This case is needed for recovering the types of external functions *)
-        let ty = tr.typ env t.typ in
-        Term.var_lid (tr_id_aux lid ty)
-    | Local(Decl_let[m, {desc=Module decls}], t2) ->
-        let id = Id.set_typ m () in
-        let _,decls' =
-          let prefix' =
-            match prefix with
-            | None -> Type.LId id
-            | Some lid -> LDot(lid, Id.name m)
+  tr.term <-
+    (fun ({ prefix; penv; tenv } as env) t ->
+      match t.desc with
+      | Var x ->
+          let typ = tr.typ env t.typ in
+          let x' = extract_lid tr env x typ in
+          make_var_lid ~typ x'
+      | Local ((Decl_let [ (m, { desc = Module decls }) ] as decl), t2) ->
+          let m' = Id.set_typ m () in
+          let decls' =
+            let env = { env with prefix = prefix ^ Id.name m ^ "." } in
+            trans_decls_as_term (tr.term env) decls
           in
-          decls
-          |> trans_decls_as_term (tr.term (Some prefix',penv,menv))
-          |> List.fold_left_map (add_prefix m) {venv=[];tenv=[];cenv=[]}
-        in
-        let menv = (m,(decls'))::menv in
-        let penv = (id,prefix)::penv in
-        let t2' = tr.term (prefix,penv,menv) t2 in
-        let decl = Decl_let [m, Term.dummy (Id.typ m)] in (* This is used only for making venv in add_prefix *)
-        Term.locals (decl::decls') t2'
-    | Local(Decl_let[m, ({desc=Var _} as t1)], t2) when is_mod_var m ->
-        let t2' = subst ~b_ty:true m t1 t2 in
-        tr.term env t2'
-    | Local(Decl_let[m, t1], t2) when is_module t1 -> (* for first-class modules *)
-        let decls,_t1' = decomp_locals t1 in
-        assert (is_rand_unit _t1');
-        let t_decls = Term.(locals decls unit) in (* to preserve side-effects *)
-        let t1 = Term.rand ~expand:true t1.typ in
-        tr.term env [%term ignore `t_decls; let m = `t1 in `t2]
-    | Local(Decl_let defs, _) when List.exists (snd |- is_module) defs -> [%unsupported]
-    | Local(Type_ext Ext_type(p, ([], ({ext_row_path = LId c} as row))), t1) when C.is_exn p ->
-        let ext_row_path = Path.append_opt prefix (LId c) |> extract_path in
-        let env = prefix, (c,prefix)::penv, menv in
-        let t1' = tr.term env t1 in
-        let desc = Local(Type_ext (Ext_type(p, ([], {row with ext_row_path}))), t1') in
-        make desc (tr.typ env t.typ)
-    | Local(Type_ext Ext_type(p, (_, {ext_row_path = LId c})), _) when C.is_exn p ->
-        let penv' = (c,prefix)::penv in
-        tr.term_rec (prefix,penv',menv) t
-    | Local(Type_ext Ext_rebind(c, _), _) ->
-        let penv' = (c,prefix)::penv in
-        tr.term_rec (prefix,penv',menv) t
-    | Constr(b, c, ts) ->
-        let c =
-          c
-          |& (t.typ = Ty.exn) &> add_prefix_exn env
-          |> extract_path
-        in
-        let desc = Constr(b, c, List.map (tr.term env) ts) in
-        let typ = tr.typ env t.typ in
-        make desc typ
-    | _ -> tr.term_rec env t |> set_afv_shallowly);
-  tr.decl <- (fun env decl ->
-    match decl with
-    | Decl_type decls ->
-        let decls' = List.filter_out (snd |- snd |- is_mod_typ) decls in
-        if decls' = [] then
-          Decl_multi []
-        else
-          tr.decl_rec env (Decl_type decls')(* ???
-    | Type_ext(Ext_rebind(s, path)) ->
-        let s' =
-          match prefix with
-          | None -> s
-          | Some p -> Id.add_name_before Path.(to_string p) s
-        in
-        Type_ext(Ext_rebind(s', extract_path path))
-    | Type_ext(Ext_type(path, (params, row))) ->
-        let ext_row_path =
-          match prefix with
-          | None -> row.ext_row_path
-          | Some p -> Path.append p row.ext_row_path
-        in
-        let row' = {row with ext_row_path} in
-        tr.decl_rec env @@ Type_ext(Ext_type(path, (params, row')))*)
-    | _ -> tr.decl_rec env decl);
-  tr.pat <- (fun env p ->
-    let p' = tr.pat_rec env p in
-    let desc =
+          let t2' =
+            let env = { env with penv = (m', prefix) :: penv; tenv = Tenv.add_decl decl tenv } in
+            tr.term env t2
+          in
+          Term.locals decls' t2'
+      | Local ((Decl_let [ (m, { desc = Var _ }) ] as decl), t2) when is_mod_var m ->
+          let env' =
+            { env with penv = (Id.set_typ m (), prefix) :: penv; tenv = Tenv.add_decl decl tenv }
+          in
+          tr.term env' t2
+      | Local ((Decl_let [ (m, t1) ] as decl), t2) when is_module t1 (* for first-class modules *)
+        ->
+          let decls, _t1' = decomp_locals t1 in
+          assert (is_rand_unit _t1');
+          let t_decls = Term.(locals decls unit) in
+          (* to preserve side-effects *)
+          let t1 = Term.rand ~expand:true t1.typ in
+          let env =
+            { env with penv = (Id.set_typ m (), prefix) :: penv; tenv = Tenv.add_decl decl tenv }
+          in
+          tr.term env
+            [%term
+              ignore `t_decls;
+              let m = `t1 in
+              `t2]
+      | Local (Decl_let defs, _) when List.exists (snd |- is_module) defs -> [%unsupported]
+      | Local (decl, t1) ->
+          let env, decl' = extract_decl tr env decl in
+          let env = { env with tenv = Tenv.add_decl decl tenv } in
+          let t1' = tr.term env t1 in
+          make_local decl' t1'
+      | Constr (b, c, ts) ->
+          let typ = tr.typ env t.typ in
+          let c' = extract_and_complete_constr_path t.typ env c in
+          let ts' = List.map (tr.term env) ts in
+          make_construct ~poly:b c' ts' typ
+      | Record fields ->
+          let ty = tr.typ env t.typ in
+          let complete label =
+            Type.ValE._LId @@ extract_and_complete_constr_path t.typ env (LId label)
+          in
+          let fields' = List.map (Pair.map complete (tr.term env)) fields in
+          make_record fields' ty
+      | Field (t1, f) ->
+          let f' = Type.ValE._LId @@ extract_and_complete_constr_path t1.typ env (LId f) in
+          let t1' = tr.term env t1 in
+          let ty = tr.typ env t.typ in
+          make_field ~ty t1' f'
+      | _ -> tr.term_rec env t |> set_afv_shallowly);
+  tr.typ <-
+    (fun env ty ->
+      match ty with
+      | TModSig _ | TModLid _ -> Ty.unit
+      | TConstr (c, tys) -> TConstr (extract_and_complete_path env c, List.map (tr.typ env) tys)
+      | _ -> tr.typ_rec env ty);
+  tr.lid <- (fun _ _ -> assert false);
+  tr.path <- extract_and_complete_path;
+  tr.pat <-
+    (fun env p ->
+      let p' = tr.pat_rec env p in
       match p'.pat_desc with
-      | PConstr(b, c, ps) ->
-          let c =
-            c
-            |& (p.pat_typ = Ty.exn) &> add_prefix_exn env
-            |> extract_path
+      | PConstr (b, c, ps) ->
+          let c' = extract_and_complete_constr_path p.pat_typ env c in
+          let pat_desc = PConstr (b, c', ps) in
+          (set_pat_desc p' pat_desc [@alert "-unsafe"])
+      | PRecord fields ->
+          let complete label =
+            Type.ValE._LId @@ extract_and_complete_constr_path p.pat_typ env (LId label)
           in
-          PConstr(b, c, ps)
-      | _ -> p'.pat_desc
-    in
-    make_pattern desc p'.pat_typ);
-  tr.typ <- (fun env ty ->
-    match ty with
-    | TConstr(path, tys) -> Parser_wrapper.assoc_prim_typ (extract_path path) (List.map (tr.typ env) tys)
-    | TModSig _
-    | TModLid _ -> Ty.unit
-    | _ -> tr.typ_rec env ty);
-  let init_env = (None,[],[]) in
-  tr.term init_env,
-  tr.typ init_env,
-  tr.var init_env
+          let fields' = List.map (Pair.map_fst complete) fields in
+          let pat_desc = PRecord fields' in
+          (set_pat_desc p' pat_desc [@alert "-unsafe"])
+      | _ -> p');
+
+  let init_env = { prefix = ""; penv = []; cenv = []; tenv = !!Tenv.init } in
+  (tr.term init_env, tr.typ init_env, tr.var init_env)
 
 let remove_signature_declaration =
   let tr = Tr.make () in
-  let tr_desc desc =
-    match desc with
-    | Local(Decl_type decl, t) ->
-        let decl' = List.filter_out (snd |- snd |- is_module_or_functor_typ) decl in
-        let t' = tr.term t in
-        if decl' = [] then
-          tr.desc t'.desc
-        else
-          Local(Decl_type decl', t')
-    | _ -> tr.desc_rec desc
-  in
-  tr.desc <- tr_desc;
+  tr.desc <-
+    (fun desc ->
+      match tr.desc_rec desc with
+      | Local (Decl_type decl, t) ->
+          let decl' = List.filter_out (snd |- snd |- is_module_or_functor_typ) decl in
+          if decl' = [] then t.desc else Local (Decl_type decl', t)
+      | desc' -> desc');
+  tr.typ <- Fun.id;
   tr.term
 
 let remove_module_dummy =
   let tr = Tr.make () in
-  tr.decl <- (fun decl ->
-    match decl with
-    | Decl_let [_, {desc = Const (Dummy ty)}] when is_mod_typ ty -> Decl_multi []
-    | _ -> tr.decl_rec decl);
+  tr.decl <-
+    (fun decl ->
+      match decl with
+      | Decl_let [ (_, { desc = Const (Dummy ty) }) ] when is_mod_typ ty -> Decl_multi []
+      | _ -> tr.decl_rec decl);
+  tr.typ <- Fun.id;
   tr.term
-
 
 let rec decls_of_module_var env m ty =
   let sgn =
-    try
-      Tenv.sig_of_mod_typ ~env ty
+    try Tenv.sig_of_mod_typ ~env ty
     with e ->
       Format.eprintf "e: %s@." (Printexc.to_string e);
       Format.eprintf "m: %a@." Lid.print m;
@@ -314,82 +309,116 @@ let rec decls_of_module_var env m ty =
       Format.eprintf "env: %a@." Print.(list (tconstr * typ)) env;
       [%invalid_arg]
   in
-  let types =
-    let make (s,(params,_)) =
-      let c = Type.LDot(path_of_lid m, string_of_constr s) in
-      let ty = Parser_wrapper.assoc_prim_typ c params in
-      s, (params, ty)
-    in
-    sgn.sig_types
-    |> List.flatten_map (List.map make)
-    |> List.map (_Decl_type -| List.singleton)
-  in
-  let append_m x = Lid.append m @@ Lid._LId x in
-  let values =
-    sgn.sig_values
-    |> List.map (fun x -> x, Term.var_lid ~typ:(Id.typ x) @@ append_m x)
-    |> List.map (fun (x,t) -> x, if is_mod_var x then make_extracted_module_of_var env (append_m x) t else t)
-    |> List.map (fun def -> Decl_let [def])
-  in
-  let exts = List.map (_Type_ext -| _Ext_type) sgn.sig_ext in
-  types @ exts @ values
+  sgn
+  |> List.flatten_map (function
+       | Sig_type decl ->
+           decl
+           |> List.map (fun (s, (params, _)) ->
+                  let c = Type.LDot (path_of_lid m, string_of_constr s) in
+                  let ty = TConstr (c, params) in
+                  Decl_type [ (s, (params, ty)) ])
+       | Sig_value x ->
+           let append_m x = Lid.append m @@ Lid._LId x in
+           let t = Term.var_lid ~typ:(Id.typ x) @@ append_m x in
+           let t = if is_mod_var x then make_extracted_module_of_var env (append_m x) t else t in
+           [ Decl_let [ (x, t) ] ]
+       | Sig_ext ext -> [ Type_ext (Ext_type ext) ])
 
-and make_extracted_module_of_var env m t =
-  make_module ~typ:t.typ (decls_of_module_var env m t.typ)
+and make_extracted_module_of_var env m t = make_module ~typ:t.typ (decls_of_module_var env m t.typ)
 
 let extract_module_var : (unit Id.t * typ) list -> term -> term =
   let tr = Tr2.make () in
-  tr.desc <- (fun env desc ->
-    match desc with
-    | Local(Decl_let[m, ({desc=Var m'} as t1)], t2) when is_mod_var m ->
-        let t1' = make_extracted_module_of_var env m' t1 in
-        let t2' = tr.term env t2 in
-        Local(Decl_let[m, t1'], t2')
-    | Module decls ->
-        decls
-        |> trans_decls_as_term (tr.term env)
-        |> _Module
-    | _ -> tr.desc_rec env desc);
+  tr.desc <-
+    (fun env desc ->
+      match desc with
+      | Local (Decl_let [ (m, ({ desc = Var m' } as t1)) ], t2) when is_mod_var m ->
+          let t1' = make_extracted_module_of_var env m' t1 in
+          let t2' = tr.term env t2 in
+          Local (Decl_let [ (m, t1') ], t2')
+      | Module decls -> decls |> trans_decls_as_term (tr.term env) |> _Module
+      | _ -> tr.desc_rec env desc);
   tr.term <- set_afv_shallowly --| tr.term_rec;
   tr.term
-
 
 (** Alpha-renaming of local modules *)
 let alpha_rename_local : term -> term =
   let tr = Tr2.make () in
-  tr.desc <- (fun bv desc ->
-    match desc with
-    | Local(Decl_let defs, t) ->
-        let map =
-          defs
-          |> List.filter_map (fun (x,_) ->
-                 if is_mod_var x && List.mem ~eq:(Eq.on Id.name) x !bv then
-                   Some (x, gen_fresh_name_var_int !bv x)
-                 else
-                   None)
-        in
-        let path_map =
-          let aux = Id.set_typ -$- () in
-          List.map (Pair.map aux (Type._LId -| aux)) map
-        in
-        let sbst = subst_var_map map -| Trans.map_typ (subst_path_head_map path_map) in
-        bv := List.rev_map_append fst defs @@ List.rev_map_append snd map !bv;
-        let t = tr.term bv @@ sbst t in
-        let defs = Fmap.(list (Id.List.subst map * (sbst -| tr.term bv))) defs in
-        Local(Decl_let defs, t)
-    | _ -> tr.desc_rec bv desc);
-  fun t -> tr.term (ref (col_modules t)) t
+  tr.desc <-
+    (fun bv desc ->
+      match desc with
+      | Local (Decl_let defs, t) ->
+          let map =
+            defs
+            |> List.filter_map (fun (x, _) ->
+                   if is_mod_var x && List.mem ~eq:(Eq.on Id.name) x !bv then
+                     Some (x, gen_fresh_name_var_int !bv x)
+                   else None)
+          in
+          let path_map =
+            let aux = Id.set_typ -$- () in
+            let map = List.map (Pair.map aux (Type._LId -| aux)) map in
+            Id.List.assoc_opt -$- map
+          in
+          let sbst = subst_var_map map -| Trans.map_typ (subst_path_head_map path_map) in
+          bv := List.rev_map_append fst defs @@ List.rev_map_append snd map !bv;
+          let t = tr.term bv @@ sbst t in
+          let defs = Fmap.(list (Id.List.subst map * (sbst -| tr.term bv))) defs in
+          Local (Decl_let defs, t)
+      | _ -> tr.desc_rec bv desc);
+  fun t -> tr.term (ref []) t (* TODO: Should we collect the names of external modules? *)
 
-let extract_path_ext_rebind =
-  let tr = Tr.make() in
-  tr.decl <- (fun decl ->
-    match decl with
-    | Type_ext(Ext_rebind(c,path)) -> Type_ext(Ext_rebind(c, extract_path path))
-    | _ -> tr.decl_rec decl);
+let extract_path_typ =
+  let tr = Tr.make () in
+  tr.decl <-
+    (fun decl ->
+      match decl with
+      | Type_ext (Ext_type (path, (params, row))) ->
+          let ext_row_path = extract_path row.ext_row_path in
+          let ext_row_args = List.map extract_typ row.ext_row_args in
+          let ext_row_ret = Option.map extract_typ row.ext_row_ret in
+          let row' = { ext_row_path; ext_row_args; ext_row_ret } in
+          Type_ext (Ext_type (path, (params, row')))
+      | Type_ext (Ext_rebind (c, path)) -> Type_ext (Ext_rebind (c, extract_path path))
+      | _ -> tr.decl_rec decl);
+  tr.typ <-
+    (fun ty ->
+      match ty with
+      | TConstr (c, tys) ->
+          let tys' = List.map tr.typ tys in
+          let c' = extract_path c in
+          TConstr (c', tys')
+      | _ -> tr.typ_rec ty);
   tr.term
 
-(* ASSUME: the module names are distinct from each other *)
-let extract (problem:Problem.t) =
+let rec mod_of_typ env ty =
+  match ty with
+  | TModSig sgn ->
+      sgn
+      |> List.filter_map (function
+           | Sig_type decl -> Some (Decl_type decl)
+           | Sig_value m when is_mod_var m -> Some (Decl_let [ (m, mod_of_typ env @@ Id.typ m) ])
+           | Sig_value _ -> None
+           | Sig_ext ext -> Some (Type_ext (Ext_type ext)))
+      |> make_module
+  | TModLid m -> mod_of_typ env @@ Tenv.assoc_value m ~env
+  | _ -> [%invalid_arg]
+
+let add_ext_mod ext_mod_typ t =
+  let env =
+    List.fold_left
+      (fun env (x, ty) -> Tenv.add_module (Id.set_typ x ty) ty ~env)
+      !!Tenv.init ext_mod_typ
+  in
+  let fv = get_fv_all t |> Id.List.unique in
+  List.L.fold_right ext_mod_typ ~init:(fv, t) ~f:(fun (x, ty) (fv, t) ->
+      if List.exists Id.(( = ) x) fv then
+        let fv' = get_fv_typ' ty @@@ fv in
+        let mt = mod_of_typ env ty in
+        (fv', Term.let_ [ (Id.set_typ x ty, mt) ] t)
+      else (fv, t))
+  |> snd
+
+let extract (problem : Problem.t) =
   let kind : Problem.kind =
     match problem.kind with
     | Safety -> Safety
@@ -399,36 +428,19 @@ let extract (problem:Problem.t) =
   let term =
     problem.term
     |@> pr "INPUT"
-    |> alpha_rename_local
-    |@> pr "alpha_rename_local"
-    |> extract_module_var problem.ext_mod_typ
-    |@> pr "extract_module_var"
+    |> add_ext_mod problem.ext_mod_typ
+    |@> pr "add_ext_mod"
     |> extract_term
     |@> pr "extract_term"
-    |> remove_signature_declaration
-    |@> pr "remove_signature_declaration"
-    |> remove_module_dummy
-    |> extract_path_ext_rebind
+    |@> !!Dbg.check @> Check.only_LId
     |> Trans.elim_unused_let ~leave_last:true
-    |@!!Dbg.check&> Check.only_LId
+    |> Trans.remove_unused_exception
+    |> Trans.remove_unused_type_decl
+    |@> pr "Trans.remove_unused_decls"
   in
   let attr = List.remove_all problem.attr Module in
-  let ext_typ =
-    problem.ext_typ
-    |> Fmap.(list (extract_path * snd extract_typ))
-    |> List.filter_out (snd |- snd |- is_mod_typ)
-  in
-  let ext_exc = Fmap.(list (extract_path * list extract_typ)) problem.ext_exc in
-  if !!Dbg.check then begin
-    let normalize = List.map (fst |- Path.to_string) |- List.sort compare in
-    let used_exn1 = col_exn_constr problem.term |> normalize in
-    let used_exn2 = col_exn_constr term         |> normalize in
-    Dbg.printf "used_exn1: %a@." Print.(list string) used_exn1;
-    Dbg.printf "used_exn2: %a@." Print.(list string) used_exn2;
-    assert (used_exn1 = used_exn2);
-    end;
   let ext_mod_typ = [] in
-  {problem with term; kind; attr; ext_typ; ext_exc; ext_mod_typ}
+  { problem with term; kind; attr; ext_mod_typ }
 
 (** N.B.: Type definition can be shadowed by [include], e.g.,
 ```
@@ -442,32 +454,26 @@ end
 ```
  *)
 let removed_hidden_types decls : Syntax.declaration list =
-  List.L.fold_right decls
-    ~init:([],[])
-    ~f:(fun decl (acc,tconstrs) ->
-      let decl',tconstrs' =
+  List.L.fold_right decls ~init:([], []) ~f:(fun decl (acc, tconstrs) ->
+      let decl', tconstrs' =
         match decl with
         | Decl_type decls ->
             let decls' = List.filter_out (fst |- Id.List.mem -$- tconstrs) decls in
-            Decl_type decls',
-            List.rev_map_append fst decls tconstrs
-        | _ -> decl, tconstrs
+            (Decl_type decls', List.rev_map_append fst decls tconstrs)
+        | _ -> (decl, tconstrs)
       in
-      decl'::acc, tconstrs')
+      (decl' :: acc, tconstrs'))
   |> fst
 
 let extract_include_term : (tconstr * typ) list -> term -> term =
-  let tr = Tr2.make() in
-  tr.desc <- (fun env desc ->
+  let tr = Tr2.make () in
+  tr.desc <-
+    (fun env desc ->
       match desc with
       | Module decls ->
-          let decls' =
-            decls
-            |> trans_decls_as_term (tr.term env)
-            |> removed_hidden_types
-          in
+          let decls' = decls |> trans_decls_as_term (tr.term env) |> removed_hidden_types in
           Module decls'
-      | Local(Include t1, t2) ->
+      | Local (Include t1, t2) ->
           let decls =
             match tr.desc env t1.desc with
             | Var m -> decls_of_module_var env m t1.typ
@@ -481,5 +487,4 @@ let extract_include_term : (tconstr * typ) list -> term -> term =
   tr.term
 
 let extract_include (problem : Problem.t) =
-  let term = extract_include_term problem.ext_mod_typ problem.term in
-  {problem with term}
+  Problem.map (extract_include_term problem.ext_mod_typ) problem

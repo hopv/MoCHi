@@ -7,11 +7,9 @@ exception TypeBottom
 exception Type_not_found of var
 
 val type_not_found : var -> 'a
-
 val map_body_def : (t -> t) -> fun_def -> fun_def
 val map_body_prog : (t -> t) -> prog -> prog
 val map_def_prog : (fun_def -> fun_def) -> prog -> prog
-
 val const_of_bool : bool -> const
 val subst : var -> t -> t -> t
 val subst_var : var -> var -> t -> t
@@ -41,7 +39,11 @@ val decomp_rand_typ : ?xs:t list option -> typ -> typ list * (t -> t list)
 val make_map_randint_to_preds : prog -> (int * (t -> t list)) list
 val arrange_ext_preds_sequence : ('a * 'b) list -> ('a * 'b list) list
 val conv_path : ('a * bool list list) list -> ('a * ext_path_part list list) list
-val merge_similar_paths : ('a * 'b * 'c * ('d * ext_path_part list list) list) list -> ('a * 'b * 'c * ('d * ext_path_part list list) list) list
+
+val merge_similar_paths :
+  ('a * 'b * 'c * ('d * ext_path_part list list) list) list ->
+  ('a * 'b * 'c * ('d * ext_path_part list list) list) list
+
 val group_by_same_branching : ('a * 'b * 'c * 'd) list -> ('a * 'b * 'c * 'd) list list
 val inlined_functions : prog -> var list
 val elim_same_arg : prog -> prog (* BUGGY *)
@@ -49,10 +51,11 @@ val rename_fun_arg : prog -> prog
 val col_events : prog -> string list
 val max_label : prog -> int
 val exists_const : const -> t -> bool
+val fun_of_binop : const -> t -> t -> t
 
 module Term : sig
-  val (@) : t -> t list -> t
-  val (@@) : t -> t list -> t
+  val ( @ ) : t -> t list -> t
+  val ( @@ ) : t -> t list -> t
   val unit : t
   val true_ : t
   val tt : t
@@ -66,23 +69,24 @@ module Term : sig
   val br : t -> t -> t
   val if_ : t -> t -> t -> t
   val event : string -> t -> t
-  val (=) : t -> t -> t
-  val (<) : t -> t -> t
-  val (>) : t -> t -> t
-  val (<=) : t -> t -> t
-  val (>=) : t -> t -> t
-  val (&&) : t -> t -> t
-  val (||) : t -> t -> t
-  val (=>) : t -> t -> t
+  val ( = ) : t -> t -> t
+  val ( < ) : t -> t -> t
+  val ( > ) : t -> t -> t
+  val ( <= ) : t -> t -> t
+  val ( >= ) : t -> t -> t
+  val ( && ) : t -> t -> t
+  val ( || ) : t -> t -> t
+  val ( => ) : t -> t -> t
   val not : t -> t
-  val (+) : t -> t -> t
-  val (-) : t -> t -> t
+  val not' : t -> t
+  val ( + ) : t -> t -> t
+  val ( - ) : t -> t -> t
   val ( * ) : t -> t -> t
-  val (/) : t -> t -> t
-  val (mod) : t -> t -> t
-  val (|->) : var -> t -> t -> t
-  val (<|) : t -> const -> t -> t
-  val (|>) : (t -> t) -> t -> t
+  val ( / ) : t -> t -> t
+  val ( mod ) : t -> t -> t
+  val ( |-> ) : var -> t -> t -> t
+  val ( <| ) : t -> const -> t -> t
+  val ( |> ) : (t -> t) -> t -> t
   val empty : t
   val mem : t -> t -> t
   val addset : t -> t -> t
